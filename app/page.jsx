@@ -1,20 +1,22 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 
-const ADMIN_TOKEN = "87800"; // intégré comme demandé
+const ADMIN_TOKEN = "87800"; // admin intégré
 
 export default function Home() {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [fetchErr, setFetchErr] = useState("");
 
+  // --- Recherche & filtre ---
+  const [q, setQ] = useState("");
+  const [typeFilter, setTypeFilter] = useState("all"); // all | offre | demande
+
   // --- Form state ---
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName]   = useState("");
   const [phone, setPhone]         = useState("");
-  const [items, setItems] = useState([
-    { type: "offre", skill: "" },
-  ]);
+  const [items, setItems] = useState([{ type: "offre", skill: "" }]);
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState("");
 
@@ -26,17 +28,16 @@ export default function Home() {
       const res = await fetch("/api/entries", { cache: "no-store" });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Erreur de chargement");
-      // Compat : si une ancienne entrée n’a pas items, on la dérive
+      // Compat anciennes entrées
       const normalized = (data.entries || []).map((e) => {
         if (Array.isArray(e.items)) return e;
         const t = String(e.type || "").toLowerCase();
         const skillsRaw = String(e.skills || "");
-        const derived =
-          skillsRaw
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean)
-            .map((s) => ({ type: t || "offre", skill: s })) || [];
+        const derived = skillsRaw
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .map((s) => ({ type: t || "offre", skill: s }));
         return { ...e, items: derived };
       });
       setEntries(normalized);
@@ -46,17 +47,12 @@ export default function Home() {
       setLoading(false);
     }
   }
+  useEffect(() => { load(); }, []);
 
-  useEffect(() => {
-    load();
-  }, []);
-
-  // Ajouter/Supprimer/MAJ lignes Type+Compétence
+  // Lignes Type+Compétence
   const addRow = () => setItems((prev) => [...prev, { type: "offre", skill: "" }]);
-  const removeRow = (idx) =>
-    setItems((prev) => prev.filter((_, i) => i !== idx));
-  const updateRow = (idx, patch) =>
-    setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+  const removeRow = (idx) => setItems((prev) => prev.filter((_, i) => i !== idx));
+  const updateRow = (idx, patch) => setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
 
   // Soumission
   async function onSubmit(e) {
@@ -95,14 +91,8 @@ export default function Home() {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Erreur ajout");
 
-      // Optimistic update
-      setEntries((prev) => [data.entry, ...prev]);
-
-      // reset form
-      setFirstName("");
-      setLastName("");
-      setPhone("");
-      setItems([{ type: "offre", skill: "" }]);
+      setEntries((prev) => [data.entry, ...prev]); // optimistic
+      setFirstName(""); setLastName(""); setPhone(""); setItems([{ type: "offre", skill: "" }]);
     } catch (e) {
       setSaveErr(String(e?.message || e));
     } finally {
@@ -130,10 +120,54 @@ export default function Home() {
     }
   }
 
-  // --- Regroupement par compétence + suggestions ---
+  // --- Utils Highlight ---
+  function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+  function Highlight({ text, query }) {
+    if (!query) return <>{text}</>;
+    try {
+      const re = new RegExp(`(${escapeRegExp(query)})`, "ig");
+      const parts = String(text).split(re);
+      return parts.map((p, i) =>
+        re.test(p) ? <mark key={i}>{p}</mark> : <span key={i}>{p}</span>
+      );
+    } catch {
+      return <>{text}</>;
+    }
+  }
+
+  // --- Filtrage ---
+  const filteredEntries = useMemo(() => {
+    const qn = q.trim().toLowerCase();
+    const tf = typeFilter;
+    return entries.filter((e) => {
+      const name = `${e.firstName || ""} ${e.lastName || ""}`.toLowerCase();
+      const phone = String(e.phone || "").toLowerCase();
+      const items = e.items || [];
+
+      const matchesQuery =
+        !qn ||
+        name.includes(qn) ||
+        phone.includes(qn) ||
+        items.some(
+          (it) =>
+            String(it.skill || "").toLowerCase().includes(qn) ||
+            String(it.type || "").toLowerCase().includes(qn)
+        );
+
+      if (!matchesQuery) return false;
+      if (tf === "all") return true;
+
+      const isOffre = tf === "offre";
+      return items.some((it) =>
+        String(it.type || "").toLowerCase().startsWith(isOffre ? "o" : "d")
+      );
+    });
+  }, [entries, q, typeFilter]);
+
+  // Groupes par compétence et suggestions basés sur l’ensemble filtré
   const bySkill = useMemo(() => {
     const map = new Map();
-    for (const e of entries) {
+    for (const e of filteredEntries) {
       for (const it of e.items || []) {
         const skill = (it.skill || "").toLowerCase();
         if (!skill) continue;
@@ -151,10 +185,9 @@ export default function Home() {
     return Array.from(map.values()).sort(
       (a, b) => b.offers.length + b.demands.length - (a.offers.length + a.demands.length)
     );
-  }, [entries]);
+  }, [filteredEntries]);
 
   const suggestions = useMemo(() => {
-    // génère quelques paires offre↔demande pour chaque compétence
     const out = [];
     for (const b of bySkill) {
       if (!b.offers.length || !b.demands.length) continue;
@@ -162,7 +195,7 @@ export default function Home() {
       let c = 0;
       for (const o of b.offers) {
         for (const d of b.demands) {
-          if (o.id === d.id) continue; // ignore même personne
+          if (o.id === d.id) continue;
           out.push({ skill: b.skill, offer: o, demand: d });
           c++;
           if (c >= limit) break;
@@ -173,7 +206,6 @@ export default function Home() {
     return out;
   }, [bySkill]);
 
-  // --- Rendering ---
   return (
     <div className="wrap">
       <h1>RERS — Réseau d’échanges réciproques de savoirs</h1>
@@ -241,22 +273,51 @@ export default function Home() {
 
       <section className="card">
         <div className="headerRow">
-          <h2>Personnes ({entries.length})</h2>
-          <div className="actions">
+          <h2>Personnes ({filteredEntries.length}/{entries.length})</h2>
+
+          <div className="searchRow">
+            <input
+              className="search"
+              placeholder="Rechercher (nom, tél., compétence, offre/demande)…"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+            {q && (
+              <button className="btn subtle" onClick={() => setQ("")} title="Effacer">
+                Effacer
+              </button>
+            )}
+            <select
+              className="typeSelect"
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value)}
+              title="Filtrer par type"
+            >
+              <option value="all">Tous types</option>
+              <option value="offre">Offres</option>
+              <option value="demande">Demandes</option>
+            </select>
             <button className="btn" onClick={load} disabled={loading}>
               {loading ? "Actualisation…" : "Recharger"}
             </button>
           </div>
         </div>
+
         {fetchErr && <p className="err">Erreur chargement : {fetchErr}</p>}
+
         <div className="list">
-          {entries.map((e) => (
+          {filteredEntries.map((e) => (
             <div key={e.id} className="entry">
               <div className="who">
                 <strong>
-                  {(e.firstName || "") + " " + (e.lastName || "")}
+                  <Highlight
+                    text={`${e.firstName || ""} ${e.lastName || ""}`.trim()}
+                    query={q}
+                  />
                 </strong>
-                <div className="phone">{e.phone}</div>
+                <div className="phone">
+                  <Highlight text={e.phone} query={q} />
+                </div>
               </div>
               <div className="chips">
                 {(e.items || []).map((it, i) => {
@@ -264,7 +325,8 @@ export default function Home() {
                   const isDem = t.startsWith("d");
                   return (
                     <span key={i} className={"chip " + (isDem ? "dem" : "off")}>
-                      {isDem ? "Demande" : "Offre"} · {it.skill}
+                      <Highlight text={isDem ? "Demande" : "Offre"} query={q} /> ·{" "}
+                      <Highlight text={it.skill} query={q} />
                     </span>
                   );
                 })}
@@ -279,7 +341,10 @@ export default function Home() {
 
       <section className="card">
         <h2>Bulles par compétence</h2>
-        <p className="muted">Taille = volume total (offres + demandes). Couleur verte/orange selon la proportion.</p>
+        <p className="muted">
+          Taille = volume total (offres + demandes). Couleur verte/orange selon la proportion.
+          (Filtré par votre recherche)
+        </p>
         <div className="bubbles">
           {bySkill.map((b) => {
             const total = b.offers.length + b.demands.length;
@@ -294,7 +359,7 @@ export default function Home() {
             return (
               <div key={b.skill} className="bubble" style={style} title={b.skill}>
                 <div className="bubbleLabel">
-                  <div className="bubbleSkill">{b.skill}</div>
+                  <div className="bubbleSkill"><Highlight text={b.skill} query={q} /></div>
                   <div className="bubbleCounts">
                     <span className="offCount">{b.offers.length} off.</span>
                     <span className="demCount">{b.demands.length} dem.</span>
@@ -314,7 +379,7 @@ export default function Home() {
           <ul className="suggests">
             {suggestions.map((s, i) => (
               <li key={i}>
-                <strong>{s.skill}</strong> :{" "}
+                <strong><Highlight text={s.skill} query={q} /></strong> :{" "}
                 <span className="tag off">{s.offer.name}</span> ↔{" "}
                 <span className="tag dem">{s.demand.name}</span>
               </li>
@@ -339,8 +404,11 @@ export default function Home() {
         .btn.primary { background: #111827; color: #fff; border-color: #111827; }
         .btn.danger { background: #ef4444; color: #fff; border-color: #ef4444; }
         .btn.subtle { background: #fff; }
-        .headerRow { display: flex; justify-content: space-between; align-items: center; }
-        .list { display: flex; flex-direction: column; gap: 10px; }
+        .headerRow { display: flex; flex-direction: column; gap: 10px; }
+        .searchRow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        .search { flex: 1 1 280px; min-width: 220px; }
+        .typeSelect { min-width: 150px; }
+        .list { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
         .entry { display: grid; grid-template-columns: 1fr 2fr auto; gap: 10px; align-items: center; border: 1px solid #f1f1f1; border-radius: 10px; padding: 10px; }
         .who strong { font-size: 15px; }
         .phone { font-size: 12px; color: #666; }
@@ -361,6 +429,7 @@ export default function Home() {
         .tag { padding: 2px 8px; border-radius: 999px; font-size: 12px; }
         .tag.off { background: #e6f9f2; color: #065f46; border: 1px solid #b7f0df; }
         .tag.dem { background: #fff4e5; color: #92400e; border: 1px solid #fde6c7; }
+        mark { background: #fff59d; padding: 0 2px; border-radius: 3px; }
       `}</style>
     </div>
   );
