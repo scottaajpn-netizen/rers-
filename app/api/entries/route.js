@@ -1,117 +1,140 @@
 // app/api/entries/route.js
+// API Edge pour lire/ajouter/supprimer des entrées RERS dans un JSON stocké sur Vercel Blob.
+//
+// ⚙️ Prérequis côté Vercel (Project Settings → Environment Variables)
+// - BLOB_READ_WRITE_TOKEN = <ton token Blob Read/Write>
+//
+// 🔐 Sécurité basique
+// - Écriture/Suppression : nécessite l'en-tête HTTP `x-admin-token: 87800`.
+// - Lecture : publique via cette route (le blob lui-même reste public, mais son URL n'est pas exposée).
+//
+// ❗️Important pour ton plan actuel : access doit être "public" (sinon erreur "access must be \"public\"").
+//    On garde addRandomSuffix:false pour avoir un chemin stable.
+
+export const runtime = "edge";
+
 import { NextResponse } from "next/server";
 import { list, put } from "@vercel/blob";
 
-export const runtime = "edge";
-export const dynamic = "force-dynamic";
-
 const KEY = "rers/data.json";
-const ADMIN_TOKEN = "87800"; // mot de passe admin (écrit en clair côté serveur à ta demande)
-const TOKEN = process.env.BLOB_READ_WRITE_TOKEN; // Vercel -> Project -> Settings -> Environment Variables
-const VIEW_PASSWORD = process.env.VIEW_PASSWORD || ""; // optionnel : si vide, lecture publique
+const ADMIN_TOKEN = "87800";
+const TOKEN = process.env.BLOB_READ_WRITE_TOKEN;
+
+// --- utilitaires ---
+
+function isAdmin(req) {
+  const header = req.headers.get("x-admin-token") || "";
+  return header === ADMIN_TOKEN;
+}
+
+async function getBlobUrl() {
+  // Cherche le blob exact "rers/data.json"
+  const { blobs } = await list({ prefix: KEY, token: TOKEN });
+  const found = blobs.find((b) => b.pathname === KEY);
+  return found ? found.url : null;
+}
 
 async function readStore() {
-  const { blobs } = await list({ prefix: KEY, token: TOKEN });
-  const hit = blobs.find((b) => b.pathname === KEY);
-  if (!hit) return { entries: [] };
-
-  // l'URL retournée par list est valable côté serveur
-  const res = await fetch(hit.url, { cache: "no-store" });
-  if (!res.ok) return { entries: [] };
+  const url = await getBlobUrl();
+  if (!url) return { entries: [] }; // première écriture si vide
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error("Lecture du blob impossible");
   return await res.json();
 }
 
 async function writeStore(obj) {
+  // Écrit en public (exigé par ton plan actuel) avec un chemin stable
   await put(KEY, JSON.stringify(obj, null, 2), {
-    access: "private",                // <-- privé maintenant
+    access: "public",
     addRandomSuffix: false,
     contentType: "application/json",
     token: TOKEN,
   });
 }
 
-function isAdmin(req) {
-  return (req.headers.get("x-admin-token") || "") === ADMIN_TOKEN;
-}
+// --- Handlers ---
 
-export async function GET(req) {
+export async function GET() {
   try {
-    // protection de lecture si VIEW_PASSWORD défini
-    if (VIEW_PASSWORD) {
-      const t = req.headers.get("x-view-token") || "";
-      if (t !== VIEW_PASSWORD) {
-        return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
-      }
+    if (!TOKEN) {
+      return NextResponse.json(
+        { error: "BLOB_READ_WRITE_TOKEN manquant (Project Settings → Environment Variables)." },
+        { status: 500 }
+      );
     }
     const data = await readStore();
-    return NextResponse.json({ entries: data.entries || [] }, { status: 200 });
+    return NextResponse.json({ ok: true, entries: data.entries || [] });
   } catch (e) {
-    return NextResponse.json(
-      { error: e?.message || "Erreur lecture" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: String(e?.message || e) }, { status: 500 });
   }
 }
 
 export async function POST(req) {
   try {
+    if (!TOKEN) {
+      return NextResponse.json(
+        { error: "BLOB_READ_WRITE_TOKEN manquant (Project Settings → Environment Variables)." },
+        { status: 500 }
+      );
+    }
     if (!isAdmin(req)) {
       return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
     }
-    const body = await req.json();
-    const required = ["firstName", "lastName", "phone", "type", "skills"];
-    for (const k of required) {
-      if (!String(body?.[k] || "").trim()) {
-        return NextResponse.json({ error: `Champ manquant: ${k}` }, { status: 400 });
-      }
-    }
 
+    const body = await req.json().catch(() => ({}));
     const entry = {
       id: String(Date.now()) + "-" + Math.random().toString(36).slice(2, 7),
-      firstName: String(body.firstName).trim(),
-      lastName: String(body.lastName).trim(),
-      phone: String(body.phone).trim(),
-      type: String(body.type).toLowerCase() === "offre" ? "offre" : "demande",
-      skills: String(body.skills).trim(),
+      firstName: String(body.firstName || "").trim(),
+      lastName: String(body.lastName || "").trim(),
+      phone: String(body.phone || "").trim(),
+      type: String(body.type || "").trim(), // "offre" | "demande"
+      skills: String(body.skills || "").trim(),
       createdAt: new Date().toISOString(),
     };
 
-    const data = await readStore();
-    data.entries = Array.isArray(data.entries) ? data.entries : [];
-    data.entries.unshift(entry);
-    await writeStore(data);
+    // Validation ultra-simple
+    if (!entry.firstName || !entry.phone || !entry.type) {
+      return NextResponse.json(
+        { error: "Champs requis manquants (firstName, phone, type)." },
+        { status: 400 }
+      );
+    }
 
-    return NextResponse.json({ entry }, { status: 201 });
+    const store = await readStore();
+    const next = Array.isArray(store.entries) ? store.entries.slice() : [];
+    next.unshift(entry); // on insère en tête
+    await writeStore({ entries: next });
+
+    return NextResponse.json({ ok: true, entry }, { status: 201 });
   } catch (e) {
-    return NextResponse.json(
-      { error: e?.message || "Erreur ajout" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: String(e?.message || e) }, { status: 500 });
   }
 }
 
 export async function DELETE(req) {
   try {
+    if (!TOKEN) {
+      return NextResponse.json(
+        { error: "BLOB_READ_WRITE_TOKEN manquant (Project Settings → Environment Variables)." },
+        { status: 500 }
+      );
+    }
     if (!isAdmin(req)) {
       return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
     }
-    const { searchParams } = new URL(req.url);
-    const id = searchParams.get("id");
-    if (!id) return NextResponse.json({ error: "id manquant" }, { status: 400 });
 
-    const data = await readStore();
-    const before = data.entries?.length || 0;
-    data.entries = (data.entries || []).filter((e) => e.id !== id);
-
-    if (data.entries.length === before) {
-      return NextResponse.json({ error: "Non trouvé" }, { status: 404 });
+    const { id } = await req.json().catch(() => ({}));
+    if (!id) {
+      return NextResponse.json({ error: "id requis" }, { status: 400 });
     }
-    await writeStore(data);
-    return NextResponse.json({ ok: true }, { status: 200 });
+
+    const store = await readStore();
+    const before = Array.isArray(store.entries) ? store.entries : [];
+    const after = before.filter((e) => e.id !== id);
+
+    await writeStore({ entries: after });
+    return NextResponse.json({ ok: true, id, removed: before.length - after.length });
   } catch (e) {
-    return NextResponse.json(
-      { error: e?.message || "Erreur suppression" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: String(e?.message || e) }, { status: 500 });
   }
 }
