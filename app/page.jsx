@@ -1,99 +1,90 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
-import "./globals.css";
+import { useEffect, useMemo, useState } from "react";
 
-// --- CONFIG SIMPLIFIÉE --- //
-const ADMIN_TOKEN = "87800"; // tu m’as demandé de l’intégrer en dur
-const API_URL = "/api/entries";
+const ADMIN_TOKEN = "87800"; // intégré comme demandé
 
-// couleur stable par compétence
-function colorForSkill(skill) {
-  const s = (skill || "").toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
-  return `hsl(${h} 80% 85%)`; // fond pastel
-}
-function borderColorForSkill(skill) {
-  const s = (skill || "").toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
-  return `hsl(${h} 70% 45%)`; // pour la bordure
-}
+export default function Home() {
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [fetchErr, setFetchErr] = useState("");
 
-// normalise et prend la première compétence comme "clé de regroupement"
-function primarySkill(skills) {
-  if (!skills) return "Autre";
-  const first = String(skills).split(/[;,/|]/)[0] || skills;
-  return first.trim() || "Autre";
-}
+  // --- Form state ---
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName]   = useState("");
+  const [phone, setPhone]         = useState("");
+  const [items, setItems] = useState([
+    { type: "offre", skill: "" },
+  ]);
+  const [saving, setSaving] = useState(false);
+  const [saveErr, setSaveErr] = useState("");
 
-export default function Page() {
-  const [entries, setEntries]   = useState([]);
-  const [loading, setLoading]   = useState(false);
-  const [adding, setAdding]     = useState(false);
-  const [deletingId, setDeletingId] = useState(null);
-  const viewTokenRef = useRef(null); // pour VIEW_PASSWORD si activé côté serveur
-
-  // form
-  const [firstName, setFirst] = useState("");
-  const [lastName,  setLast]  = useState("");
-  const [phone,     setPhone] = useState("");
-  const [type,      setType]  = useState("offre");
-  const [skills,    setSkills]= useState("");
-
-  // charge au montage + bouton recharger
-  async function fetchEntries(opts = { forcePrompt: false }) {
-    setLoading(true);
+  // Charger les données
+  async function load() {
     try {
-      let headers = {};
-      // si on a déjà un view token en localStorage, on le met
-      const saved = window.localStorage.getItem("rers_view_token") || "";
-      if (saved) headers["x-view-token"] = saved;
-      if (opts.forcePrompt) {
-        const ask = window.prompt("Mot de passe lecture (si demandé par le serveur) :") || "";
-        viewTokenRef.current = ask;
-        if (ask) {
-          window.localStorage.setItem("rers_view_token", ask);
-          headers["x-view-token"] = ask;
-        }
-      }
-
-      const res = await fetch(API_URL, { headers, cache: "no-store" });
-      if (res.status === 401) {
-        // serveur protégé par VIEW_PASSWORD : on redemande proprement
-        const ask = window.prompt("Mot de passe lecture requis :") || "";
-        viewTokenRef.current = ask;
-        if (ask) {
-          window.localStorage.setItem("rers_view_token", ask);
-          const retry = await fetch(API_URL, { headers: { "x-view-token": ask }, cache: "no-store" });
-          if (!retry.ok) throw new Error(await retry.text());
-          const data = await retry.json();
-          setEntries(data.entries || []);
-        } else {
-          setEntries([]);
-        }
-      } else {
-        if (!res.ok) throw new Error(await res.text());
-        const data = await res.json();
-        setEntries(data.entries || []);
-      }
+      setLoading(true);
+      setFetchErr("");
+      const res = await fetch("/api/entries", { cache: "no-store" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Erreur de chargement");
+      // Compat : si une ancienne entrée n’a pas items, on la dérive
+      const normalized = (data.entries || []).map((e) => {
+        if (Array.isArray(e.items)) return e;
+        const t = String(e.type || "").toLowerCase();
+        const skillsRaw = String(e.skills || "");
+        const derived =
+          skillsRaw
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .map((s) => ({ type: t || "offre", skill: s })) || [];
+        return { ...e, items: derived };
+      });
+      setEntries(normalized);
     } catch (e) {
-      alert("Erreur chargement : " + (e?.message || e));
+      setFetchErr(String(e?.message || e));
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    fetchEntries();
+    load();
   }, []);
 
-  async function onAdd(e) {
+  // Ajouter/Supprimer/MAJ lignes Type+Compétence
+  const addRow = () => setItems((prev) => [...prev, { type: "offre", skill: "" }]);
+  const removeRow = (idx) =>
+    setItems((prev) => prev.filter((_, i) => i !== idx));
+  const updateRow = (idx, patch) =>
+    setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+
+  // Soumission
+  async function onSubmit(e) {
     e.preventDefault();
-    setAdding(true);
+    setSaveErr("");
+    setSaving(true);
     try {
-      const body = { firstName, lastName, phone, type, skills };
-      const res = await fetch(API_URL, {
+      const normalizedItems = items
+        .map((it) => ({
+          type: String(it.type || "").trim().toLowerCase(),
+          skill: String(it.skill || "").trim(),
+        }))
+        .filter((it) => it.skill);
+
+      if (!firstName.trim() || !phone.trim() || !normalizedItems.length) {
+        setSaveErr("Prénom, téléphone et au moins une compétence sont requis.");
+        setSaving(false);
+        return;
+      }
+
+      const body = {
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        phone: phone.trim(),
+        items: normalizedItems,
+      };
+
+      const res = await fetch("/api/entries", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -101,159 +92,276 @@ export default function Page() {
         },
         body: JSON.stringify(body),
       });
-      if (!res.ok) {
-        const t = await res.text();
-        throw new Error(t || "Erreur ajout");
-      }
-      setFirst(""); setLast(""); setPhone(""); setType("offre"); setSkills("");
-      await fetchEntries();
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Erreur ajout");
+
+      // Optimistic update
+      setEntries((prev) => [data.entry, ...prev]);
+
+      // reset form
+      setFirstName("");
+      setLastName("");
+      setPhone("");
+      setItems([{ type: "offre", skill: "" }]);
     } catch (e) {
-      alert("Erreur ajout : " + (e?.message || e));
+      setSaveErr(String(e?.message || e));
     } finally {
-      setAdding(false);
+      setSaving(false);
     }
   }
 
+  // Suppression
   async function onDelete(id) {
-    if (!id) return;
     if (!confirm("Supprimer cette entrée ?")) return;
-    setDeletingId(id);
     try {
-      const res = await fetch(`${API_URL}?id=${encodeURIComponent(id)}`, {
+      const res = await fetch("/api/entries", {
         method: "DELETE",
-        headers: { "x-admin-token": ADMIN_TOKEN },
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-token": ADMIN_TOKEN,
+        },
+        body: JSON.stringify({ id }),
       });
-      if (!res.ok) throw new Error(await res.text());
-      setEntries((cur) => cur.filter((e) => e.id !== id));
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Erreur suppression");
+      setEntries((prev) => prev.filter((e) => e.id !== id));
     } catch (e) {
-      alert("Erreur suppression : " + (e?.message || e));
-    } finally {
-      setDeletingId(null);
+      alert(String(e?.message || e));
     }
   }
 
-  // regroupement par compétence (clé = première compétence)
-  const groups = useMemo(() => {
+  // --- Regroupement par compétence + suggestions ---
+  const bySkill = useMemo(() => {
     const map = new Map();
     for (const e of entries) {
-      const key = primarySkill(e.skills) || "Autre";
-      if (!map.has(key)) map.set(key, { skill: key, offres: [], demandes: [] });
-      if (e.type === "offre") map.get(key).offres.push(e);
-      else map.get(key).demandes.push(e);
+      for (const it of e.items || []) {
+        const skill = (it.skill || "").toLowerCase();
+        if (!skill) continue;
+        if (!map.has(skill)) map.set(skill, { skill, offers: [], demands: [] });
+        const bucket = map.get(skill);
+        const person = {
+          id: e.id,
+          name: `${e.firstName || ""} ${e.lastName || ""}`.trim(),
+          phone: e.phone || "",
+        };
+        if ((it.type || "").toLowerCase().startsWith("d")) bucket.demands.push(person);
+        else bucket.offers.push(person);
+      }
     }
-    // ordre : groupes avec plus de « matchs » en premier (min(offres, demandes))
-    return [...map.values()].sort((a, b) => {
-      const ma = Math.min(a.offres.length, a.demandes.length);
-      const mb = Math.min(b.offres.length, b.demandes.length);
-      return mb - ma || (b.offres.length + b.demandes.length) - (a.offres.length + a.demandes.length);
-    });
+    return Array.from(map.values()).sort(
+      (a, b) => b.offers.length + b.demands.length - (a.offers.length + a.demands.length)
+    );
   }, [entries]);
 
+  const suggestions = useMemo(() => {
+    // génère quelques paires offre↔demande pour chaque compétence
+    const out = [];
+    for (const b of bySkill) {
+      if (!b.offers.length || !b.demands.length) continue;
+      const limit = Math.min(5, b.offers.length * b.demands.length);
+      let c = 0;
+      for (const o of b.offers) {
+        for (const d of b.demands) {
+          if (o.id === d.id) continue; // ignore même personne
+          out.push({ skill: b.skill, offer: o, demand: d });
+          c++;
+          if (c >= limit) break;
+        }
+        if (c >= limit) break;
+      }
+    }
+    return out;
+  }, [bySkill]);
+
+  // --- Rendering ---
   return (
-    <div className="container">
-      <h1>RERS – Réseau d’échanges réciproques de savoir</h1>
+    <div className="wrap">
+      <h1>RERS — Réseau d’échanges réciproques de savoirs</h1>
 
-      <div className="toolbar">
-        <button className="btn" onClick={() => fetchEntries()} disabled={loading}>
-          {loading ? "Rechargement…" : "Recharger"}
-        </button>
-        <span className="badge">Total: {entries.length}</span>
-        <span className="small">Les bulles sont colorées par compétence. Bordure <b>pleine</b> = offre, <b>pointillée</b> = demande.</span>
-      </div>
-
-      <div className="card" style={{ marginBottom: 18 }}>
-        <div className="sectionTitle">Ajouter une personne</div>
-        <form onSubmit={onAdd} style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(6,minmax(0,1fr))" }}>
-          <input className="input" placeholder="Prénom" value={firstName}  onChange={(e)=>setFirst(e.target.value)} />
-          <input className="input" placeholder="Nom"    value={lastName}   onChange={(e)=>setLast(e.target.value)} />
-          <input className="input" placeholder="Téléphone" value={phone}  onChange={(e)=>setPhone(e.target.value)} />
-          <select className="select" value={type} onChange={(e)=>setType(e.target.value)}>
-            <option value="offre">Offre</option>
-            <option value="demande">Demande</option>
-          </select>
-          <input className="input" placeholder="Compétences (ex: couture, tricot)" value={skills} onChange={(e)=>setSkills(e.target.value)} />
-          <button className="btn" disabled={adding}>{adding ? "Ajout…" : "Ajouter"}</button>
-        </form>
-      </div>
-
-      <div className="sectionTitle">Réseau par compétence</div>
-
-      {groups.map((g) => {
-        const bg = colorForSkill(g.skill);
-        const bc = borderColorForSkill(g.skill);
-        const matchCount = Math.min(g.offres.length, g.demandes.length);
-        return (
-          <div className="group" key={g.skill} style={{ borderColor: bc, background: bg }}>
-            <div className="groupHeader">
-              <div className="skillSwatch" style={{ background: bc }} />
-              <strong>{g.skill}</strong>
-              <span className="badge">Offres: {g.offres.length}</span>
-              <span className="badge">Demandes: {g.demandes.length}</span>
-              {matchCount > 0 && <span className="badge">Matchs possibles: {matchCount}</span>}
-            </div>
-
-            <div className="columns">
-              <div>
-                <div className="columnTitle">Offres</div>
-                <div className="bubbles">
-                  {g.offres.map((e) => (
-                    <div
-                      key={e.id}
-                      className="bubble offre"
-                      style={{ background: bg, borderColor: bc }}
-                      title={e.skills}
-                    >
-                      <span className="name">{e.firstName} {e.lastName}</span>
-                      <span className="phone">{e.phone}</span>
-                      <span className="skillTag">{primarySkill(e.skills)}</span>
-                      <button
-                        className="del"
-                        onClick={() => onDelete(e.id)}
-                        disabled={deletingId === e.id}
-                        aria-label="Supprimer"
-                        title="Supprimer"
-                      >
-                        🗑️
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <div className="columnTitle">Demandes</div>
-                <div className="bubbles">
-                  {g.demandes.map((e) => (
-                    <div
-                      key={e.id}
-                      className="bubble demande"
-                      style={{ background: bg, borderColor: bc, borderStyle: "dashed" }}
-                      title={e.skills}
-                    >
-                      <span className="name">{e.firstName} {e.lastName}</span>
-                      <span className="phone">{e.phone}</span>
-                      <span className="skillTag">{primarySkill(e.skills)}</span>
-                      <button
-                        className="del"
-                        onClick={() => onDelete(e.id)}
-                        disabled={deletingId === e.id}
-                        aria-label="Supprimer"
-                        title="Supprimer"
-                      >
-                        🗑️
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
+      <section className="card">
+        <h2>Ajouter une personne</h2>
+        <form onSubmit={onSubmit} className="form">
+          <div className="grid2">
+            <label>
+              Prénom*
+              <input value={firstName} onChange={(e) => setFirstName(e.target.value)} />
+            </label>
+            <label>
+              Nom
+              <input value={lastName} onChange={(e) => setLastName(e.target.value)} />
+            </label>
+            <label>
+              Téléphone*
+              <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} />
+            </label>
           </div>
-        );
-      })}
 
-      {groups.length === 0 && (
-        <div className="small">Aucune entrée pour le moment.</div>
-      )}
+          <div className="items">
+            <div className="itemsHead">
+              <span>Type</span>
+              <span>Compétence</span>
+              <span></span>
+            </div>
+            {items.map((it, idx) => (
+              <div className="itemRow" key={idx}>
+                <select
+                  value={it.type}
+                  onChange={(e) => updateRow(idx, { type: e.target.value })}
+                >
+                  <option value="offre">Offre</option>
+                  <option value="demande">Demande</option>
+                </select>
+                <input
+                  placeholder="ex: couture, anglais, jardinage…"
+                  value={it.skill}
+                  onChange={(e) => updateRow(idx, { skill: e.target.value })}
+                />
+                <button
+                  type="button"
+                  className="btn subtle"
+                  onClick={() => removeRow(idx)}
+                  disabled={items.length === 1}
+                  title="Supprimer cette ligne"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+            <button type="button" className="btn" onClick={addRow}>
+              + Ajouter une ligne
+            </button>
+          </div>
+
+          {saveErr && <p className="err">Erreur ajout : {saveErr}</p>}
+          <button className="btn primary" disabled={saving}>
+            {saving ? "Envoi…" : "Enregistrer"}
+          </button>
+        </form>
+      </section>
+
+      <section className="card">
+        <div className="headerRow">
+          <h2>Personnes ({entries.length})</h2>
+          <div className="actions">
+            <button className="btn" onClick={load} disabled={loading}>
+              {loading ? "Actualisation…" : "Recharger"}
+            </button>
+          </div>
+        </div>
+        {fetchErr && <p className="err">Erreur chargement : {fetchErr}</p>}
+        <div className="list">
+          {entries.map((e) => (
+            <div key={e.id} className="entry">
+              <div className="who">
+                <strong>
+                  {(e.firstName || "") + " " + (e.lastName || "")}
+                </strong>
+                <div className="phone">{e.phone}</div>
+              </div>
+              <div className="chips">
+                {(e.items || []).map((it, i) => {
+                  const t = (it.type || "").toLowerCase();
+                  const isDem = t.startsWith("d");
+                  return (
+                    <span key={i} className={"chip " + (isDem ? "dem" : "off")}>
+                      {isDem ? "Demande" : "Offre"} · {it.skill}
+                    </span>
+                  );
+                })}
+              </div>
+              <button className="btn danger" onClick={() => onDelete(e.id)}>
+                Supprimer
+              </button>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Bulles par compétence</h2>
+        <p className="muted">Taille = volume total (offres + demandes). Couleur verte/orange selon la proportion.</p>
+        <div className="bubbles">
+          {bySkill.map((b) => {
+            const total = b.offers.length + b.demands.length;
+            const size = Math.min(180, 70 + Math.round(20 * Math.sqrt(total)));
+            const pctOff = total ? Math.round((b.offers.length / total) * 100) : 0;
+            const deg = Math.round((pctOff / 100) * 360);
+            const style = {
+              width: size + "px",
+              height: size + "px",
+              background: `conic-gradient(#10b981 0 ${deg}deg, #f59e0b ${deg}deg 360deg)`,
+            };
+            return (
+              <div key={b.skill} className="bubble" style={style} title={b.skill}>
+                <div className="bubbleLabel">
+                  <div className="bubbleSkill">{b.skill}</div>
+                  <div className="bubbleCounts">
+                    <span className="offCount">{b.offers.length} off.</span>
+                    <span className="demCount">{b.demands.length} dem.</span>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Suggestions de mises en relation</h2>
+        {suggestions.length === 0 ? (
+          <p className="muted">Aucune paire trouvée (ajoute des offres et des demandes sur une même compétence).</p>
+        ) : (
+          <ul className="suggests">
+            {suggestions.map((s, i) => (
+              <li key={i}>
+                <strong>{s.skill}</strong> :{" "}
+                <span className="tag off">{s.offer.name}</span> ↔{" "}
+                <span className="tag dem">{s.demand.name}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <style jsx>{`
+        .wrap { max-width: 1000px; margin: 24px auto; padding: 0 16px; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+        h1 { font-size: 24px; margin-bottom: 16px; }
+        h2 { font-size: 18px; margin: 0 0 12px; }
+        .card { background: #fff; border: 1px solid #eee; border-radius: 12px; padding: 16px; margin: 16px 0; }
+        .form label { display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+        input, select { padding: 10px; border: 1px solid #ddd; border-radius: 8px; }
+        .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 12px; }
+        .items { margin-top: 8px; }
+        .itemsHead { display: grid; grid-template-columns: 140px 1fr 40px; font-size: 12px; color: #666; margin-bottom: 4px; }
+        .itemRow { display: grid; grid-template-columns: 140px 1fr 40px; gap: 8px; margin: 6px 0; }
+        .btn { border: 1px solid #ddd; background: #fafafa; padding: 8px 12px; border-radius: 8px; cursor: pointer; }
+        .btn:hover { background: #f2f2f2; }
+        .btn.primary { background: #111827; color: #fff; border-color: #111827; }
+        .btn.danger { background: #ef4444; color: #fff; border-color: #ef4444; }
+        .btn.subtle { background: #fff; }
+        .headerRow { display: flex; justify-content: space-between; align-items: center; }
+        .list { display: flex; flex-direction: column; gap: 10px; }
+        .entry { display: grid; grid-template-columns: 1fr 2fr auto; gap: 10px; align-items: center; border: 1px solid #f1f1f1; border-radius: 10px; padding: 10px; }
+        .who strong { font-size: 15px; }
+        .phone { font-size: 12px; color: #666; }
+        .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+        .chip { padding: 6px 10px; border-radius: 999px; font-size: 12px; }
+        .chip.off { background: #e6f9f2; color: #065f46; border: 1px solid #b7f0df; }
+        .chip.dem { background: #fff4e5; color: #92400e; border: 1px solid #fde6c7; }
+        .err { color: #b91c1c; margin: 8px 0; }
+        .muted { color: #6b7280; font-size: 13px; }
+        .bubbles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 16px; align-items: start; }
+        .bubble { border-radius: 999px; position: relative; display: flex; align-items: center; justify-content: center; box-shadow: inset 0 0 0 6px rgba(255,255,255,0.75), 0 4px 14px rgba(0,0,0,0.08); }
+        .bubbleLabel { text-align: center; padding: 6px; }
+        .bubbleSkill { font-weight: 600; font-size: 13px; text-transform: capitalize; color: #111; }
+        .bubbleCounts { font-size: 12px; color: #444; display: flex; gap: 8px; justify-content: center; }
+        .offCount { color: #065f46; }
+        .demCount { color: #92400e; }
+        .suggests { display: grid; gap: 8px; padding-left: 18px; }
+        .tag { padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+        .tag.off { background: #e6f9f2; color: #065f46; border: 1px solid #b7f0df; }
+        .tag.dem { background: #fff4e5; color: #92400e; border: 1px solid #fde6c7; }
+      `}</style>
     </div>
   );
 }
