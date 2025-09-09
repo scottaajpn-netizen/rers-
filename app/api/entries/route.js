@@ -6,14 +6,16 @@ export const runtime = "edge";
 export const dynamic = "force-dynamic";
 
 const KEY = "rers/data.json";
-const ADMIN_TOKEN = "87800"; // mot de passe admin
-const TOKEN = process.env.BLOB_READ_WRITE_TOKEN; // doit exister dans Vercel -> Project -> Settings -> Environment Variables
+const ADMIN_TOKEN = "87800"; // mot de passe admin (écrit en clair côté serveur à ta demande)
+const TOKEN = process.env.BLOB_READ_WRITE_TOKEN; // Vercel -> Project -> Settings -> Environment Variables
+const VIEW_PASSWORD = process.env.VIEW_PASSWORD || ""; // optionnel : si vide, lecture publique
 
 async function readStore() {
   const { blobs } = await list({ prefix: KEY, token: TOKEN });
   const hit = blobs.find((b) => b.pathname === KEY);
   if (!hit) return { entries: [] };
 
+  // l'URL retournée par list est valable côté serveur
   const res = await fetch(hit.url, { cache: "no-store" });
   if (!res.ok) return { entries: [] };
   return await res.json();
@@ -21,7 +23,7 @@ async function readStore() {
 
 async function writeStore(obj) {
   await put(KEY, JSON.stringify(obj, null, 2), {
-    access: "public",
+    access: "private",                // <-- privé maintenant
     addRandomSuffix: false,
     contentType: "application/json",
     token: TOKEN,
@@ -32,8 +34,15 @@ function isAdmin(req) {
   return (req.headers.get("x-admin-token") || "") === ADMIN_TOKEN;
 }
 
-export async function GET() {
+export async function GET(req) {
   try {
+    // protection de lecture si VIEW_PASSWORD défini
+    if (VIEW_PASSWORD) {
+      const t = req.headers.get("x-view-token") || "";
+      if (t !== VIEW_PASSWORD) {
+        return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
+      }
+    }
     const data = await readStore();
     return NextResponse.json({ entries: data.entries || [] }, { status: 200 });
   } catch (e) {
