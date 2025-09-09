@@ -1,375 +1,259 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import "./globals.css";
 
-const ADMIN_TOKEN = "87800";
+// --- CONFIG SIMPLIFIÉE --- //
+const ADMIN_TOKEN = "87800"; // tu m’as demandé de l’intégrer en dur
+const API_URL = "/api/entries";
 
-const styles = {
-  wrap: { maxWidth: 1100, margin: "24px auto", padding: 16 },
-  card: {
-    background: "#fff",
-    border: "1px solid #eee",
-    borderRadius: 12,
-    padding: 16,
-    boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
-    marginBottom: 16,
-  },
-  h2: { fontSize: 20, margin: "0 0 12px" },
-  row: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 },
-  input: {
-    width: "100%",
-    padding: "10px 12px",
-    borderRadius: 8,
-    border: "1px solid #ddd",
-    outline: "none",
-  },
-  select: {
-    width: "100%",
-    padding: "10px 12px",
-    borderRadius: 8,
-    border: "1px solid #ddd",
-    outline: "none",
-    background: "#fff",
-  },
-  btn: {
-    padding: "10px 14px",
-    borderRadius: 8,
-    border: "1px solid #111",
-    background: "#111",
-    color: "#fff",
-    cursor: "pointer",
-  },
-  btnGhost: {
-    padding: "10px 14px",
-    borderRadius: 8,
-    border: "1px solid #ddd",
-    background: "#fff",
-    cursor: "pointer",
-  },
-  table: {
-    width: "100%",
-    borderCollapse: "separate",
-    borderSpacing: 0,
-    overflow: "hidden",
-    borderRadius: 10,
-    border: "1px solid #eee",
-  },
-  th: {
-    textAlign: "left",
-    padding: "10px 12px",
-    background: "#fafafa",
-    borderBottom: "1px solid #eee",
-    fontWeight: 600,
-  },
-  td: { padding: "10px 12px", borderBottom: "1px solid #f2f2f2", verticalAlign: "top" },
-  chip: {
-    display: "inline-block",
-    padding: "2px 8px",
-    borderRadius: 999,
-    fontSize: 12,
-    border: "1px solid transparent",
-  },
-};
-
-function tone(type) {
-  if (type === "offre") return { bg: "#eaffea", bd: "#94d19a" }; // vert
-  if (type === "demande") return { bg: "#eaf2ff", bd: "#a7bff5" }; // bleu
-  return { bg: "#f6f6f6", bd: "#e0e0e0" };
+// couleur stable par compétence
+function colorForSkill(skill) {
+  const s = (skill || "").toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
+  return `hsl(${h} 80% 85%)`; // fond pastel
+}
+function borderColorForSkill(skill) {
+  const s = (skill || "").toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
+  return `hsl(${h} 70% 45%)`; // pour la bordure
 }
 
-// ——— util: normalisation + similarité Jaccard simple
-const STOP = new Set(["de","la","le","les","des","du","et","en","à","au","aux","d","l","un","une","pour","avec","sur","dans","par","ou"]);
-function tokenize(s) {
-  return String(s || "")
-    .toLowerCase()
-    .normalize("NFD").replace(/\p{Diacritic}/gu, "")
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .split(/\s+/)
-    .filter(w => w && !STOP.has(w));
-}
-function jaccard(a, b) {
-  const A = new Set(tokenize(a));
-  const B = new Set(tokenize(b));
-  if (!A.size && !B.size) return 0;
-  let inter = 0;
-  for (const w of A) if (B.has(w)) inter++;
-  const union = A.size + B.size - inter;
-  return inter / union;
+// normalise et prend la première compétence comme "clé de regroupement"
+function primarySkill(skills) {
+  if (!skills) return "Autre";
+  const first = String(skills).split(/[;,/|]/)[0] || skills;
+  return first.trim() || "Autre";
 }
 
 export default function Page() {
-  const [entries, setEntries] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [query, setQuery] = useState("");
+  const [entries, setEntries]   = useState([]);
+  const [loading, setLoading]   = useState(false);
+  const [adding, setAdding]     = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
+  const viewTokenRef = useRef(null); // pour VIEW_PASSWORD si activé côté serveur
 
   // form
-  const [firstName, setFirstName] = useState("");
-  const [lastName, setLastName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [type, setType] = useState("offre");
-  const [skills, setSkills] = useState("");
+  const [firstName, setFirst] = useState("");
+  const [lastName,  setLast]  = useState("");
+  const [phone,     setPhone] = useState("");
+  const [type,      setType]  = useState("offre");
+  const [skills,    setSkills]= useState("");
 
-  async function loadEntries() {
+  // charge au montage + bouton recharger
+  async function fetchEntries(opts = { forcePrompt: false }) {
     setLoading(true);
-    setError("");
     try {
-      const res = await fetch("/api/entries", { cache: "no-store" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || data?.message || `HTTP ${res.status}`);
-      setEntries(Array.isArray(data.entries) ? data.entries : []);
+      let headers = {};
+      // si on a déjà un view token en localStorage, on le met
+      const saved = window.localStorage.getItem("rers_view_token") || "";
+      if (saved) headers["x-view-token"] = saved;
+      if (opts.forcePrompt) {
+        const ask = window.prompt("Mot de passe lecture (si demandé par le serveur) :") || "";
+        viewTokenRef.current = ask;
+        if (ask) {
+          window.localStorage.setItem("rers_view_token", ask);
+          headers["x-view-token"] = ask;
+        }
+      }
+
+      const res = await fetch(API_URL, { headers, cache: "no-store" });
+      if (res.status === 401) {
+        // serveur protégé par VIEW_PASSWORD : on redemande proprement
+        const ask = window.prompt("Mot de passe lecture requis :") || "";
+        viewTokenRef.current = ask;
+        if (ask) {
+          window.localStorage.setItem("rers_view_token", ask);
+          const retry = await fetch(API_URL, { headers: { "x-view-token": ask }, cache: "no-store" });
+          if (!retry.ok) throw new Error(await retry.text());
+          const data = await retry.json();
+          setEntries(data.entries || []);
+        } else {
+          setEntries([]);
+        }
+      } else {
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        setEntries(data.entries || []);
+      }
     } catch (e) {
-      setError("Erreur chargement : " + (e?.message || "inconnue"));
+      alert("Erreur chargement : " + (e?.message || e));
     } finally {
       setLoading(false);
     }
   }
 
-  useEffect(() => { loadEntries(); }, []);
+  useEffect(() => {
+    fetchEntries();
+  }, []);
 
-  async function handleAdd(e) {
+  async function onAdd(e) {
     e.preventDefault();
-    setBusy(true);
-    setError("");
+    setAdding(true);
     try {
-      const payload = { firstName, lastName, phone, type, skills };
-      const res = await fetch("/api/entries", {
+      const body = { firstName, lastName, phone, type, skills };
+      const res = await fetch(API_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-admin-token": ADMIN_TOKEN
+          "x-admin-token": ADMIN_TOKEN,
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(body),
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error || data?.message || `HTTP ${res.status}`);
-
-      // Optimiste : on met à jour localement sans attendre un rechargement lourd
-      setEntries(prev => [data.entry, ...prev]);
-
-      // reset form
-      setFirstName(""); setLastName(""); setPhone(""); setType("offre"); setSkills("");
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || "Erreur ajout");
+      }
+      setFirst(""); setLast(""); setPhone(""); setType("offre"); setSkills("");
+      await fetchEntries();
     } catch (e) {
-      setError("Erreur ajout : " + (e?.message || "inconnue"));
+      alert("Erreur ajout : " + (e?.message || e));
     } finally {
-      setBusy(false);
+      setAdding(false);
     }
   }
 
-  async function handleDelete(id) {
+  async function onDelete(id) {
     if (!id) return;
     if (!confirm("Supprimer cette entrée ?")) return;
-    setBusy(true);
-    setError("");
+    setDeletingId(id);
     try {
-      const res = await fetch(`/api/entries?id=${encodeURIComponent(id)}`, {
+      const res = await fetch(`${API_URL}?id=${encodeURIComponent(id)}`, {
         method: "DELETE",
-        headers: { "x-admin-token": ADMIN_TOKEN }
+        headers: { "x-admin-token": ADMIN_TOKEN },
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error || data?.message || `HTTP ${res.status}`);
-      // Optimiste
-      setEntries(prev => prev.filter(e => e.id !== id));
+      if (!res.ok) throw new Error(await res.text());
+      setEntries((cur) => cur.filter((e) => e.id !== id));
     } catch (e) {
-      setError("Erreur suppression : " + (e?.message || "inconnue"));
+      alert("Erreur suppression : " + (e?.message || e));
     } finally {
-      setBusy(false);
+      setDeletingId(null);
     }
   }
 
-  function fmtPhone(p) {
-    const s = String(p || "").replace(/\D/g, "");
-    return s.replace(/(\d{2})(?=\d)/g, "$1 ").trim();
-  }
-
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return entries;
-    return entries.filter(e =>
-      (e.firstName + " " + e.lastName).toLowerCase().includes(q) ||
-      e.skills.toLowerCase().includes(q) ||
-      e.phone.replace(/\D/g, "").includes(q.replace(/\D/g, ""))
-    );
-  }, [entries, query]);
-
-  // Correspondances offre↔demande (seuil ajustable)
-  const matches = useMemo(() => {
-    const offres = filtered.filter(e => e.type === "offre");
-    const demandes = filtered.filter(e => e.type === "demande");
-    const pairs = [];
-    const THRESH = 0.35; // ajuste si besoin
-    for (const d of demandes) {
-      const scored = offres
-        .map(o => ({ o, score: jaccard(d.skills, o.skills) }))
-        .filter(x => x.score >= THRESH)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 5);
-      if (scored.length) {
-        pairs.push({ demande: d, offres: scored });
-      }
+  // regroupement par compétence (clé = première compétence)
+  const groups = useMemo(() => {
+    const map = new Map();
+    for (const e of entries) {
+      const key = primarySkill(e.skills) || "Autre";
+      if (!map.has(key)) map.set(key, { skill: key, offres: [], demandes: [] });
+      if (e.type === "offre") map.get(key).offres.push(e);
+      else map.get(key).demandes.push(e);
     }
-    return pairs;
-  }, [filtered]);
+    // ordre : groupes avec plus de « matchs » en premier (min(offres, demandes))
+    return [...map.values()].sort((a, b) => {
+      const ma = Math.min(a.offres.length, a.demandes.length);
+      const mb = Math.min(b.offres.length, b.demandes.length);
+      return mb - ma || (b.offres.length + b.demandes.length) - (a.offres.length + a.demandes.length);
+    });
+  }, [entries]);
 
   return (
-    <div style={styles.wrap}>
-      <div style={{ ...styles.card, borderColor: "#dcdcdc" }}>
-        <h1 style={{ margin: 0, fontSize: 26 }}>RERS – Réseau d’échanges réciproques de savoir</h1>
-        <p style={{ margin: "6px 0 0", color: "#666" }}>
-          Ajoutez des <b>offres</b> et des <b>demandes</b>, supprimez, recherchez, et voyez les correspondances.
-        </p>
+    <div className="container">
+      <h1>RERS – Réseau d’échanges réciproques de savoir</h1>
+
+      <div className="toolbar">
+        <button className="btn" onClick={() => fetchEntries()} disabled={loading}>
+          {loading ? "Rechargement…" : "Recharger"}
+        </button>
+        <span className="badge">Total: {entries.length}</span>
+        <span className="small">Les bulles sont colorées par compétence. Bordure <b>pleine</b> = offre, <b>pointillée</b> = demande.</span>
       </div>
 
-      {/* Formulaire */}
-      <form onSubmit={handleAdd} style={styles.card}>
-        <h2 style={styles.h2}>Ajouter une entrée</h2>
-        <div style={styles.row}>
-          <div>
-            <label>Prénom</label>
-            <input style={styles.input} value={firstName} onChange={e => setFirstName(e.target.value)} required />
-          </div>
-          <div>
-            <label>Nom</label>
-            <input style={styles.input} value={lastName} onChange={e => setLastName(e.target.value)} required />
-          </div>
-        </div>
-        <div style={{ ...styles.row, marginTop: 12 }}>
-          <div>
-            <label>Téléphone</label>
-            <input style={styles.input} value={phone} onChange={e => setPhone(e.target.value)} required />
-          </div>
-          <div>
-            <label>Type</label>
-            <select style={styles.select} value={type} onChange={e => setType(e.target.value)}>
-              <option value="offre">Offre</option>
-              <option value="demande">Demande</option>
-            </select>
-          </div>
-        </div>
-        <div style={{ marginTop: 12 }}>
-          <label>Compétences (mots clés)</label>
-          <input
-            style={styles.input}
-            placeholder="ex: cuisine italienne, aide aux devoirs, Excel, jardinage..."
-            value={skills}
-            onChange={e => setSkills(e.target.value)}
-            required
-          />
-        </div>
-        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-          <button type="submit" disabled={busy} style={styles.btn}>{busy ? "En cours..." : "Ajouter"}</button>
-          <button type="button" onClick={loadEntries} disabled={loading} style={styles.btnGhost}>
-            {loading ? "Rechargement..." : "Recharger"}
-          </button>
-          <input
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            placeholder="Rechercher..."
-            style={{ ...styles.input, maxWidth: 260 }}
-          />
-        </div>
-        {error ? <div style={{ marginTop: 8, color: "#b00020" }}>{error}</div> : null}
-      </form>
+      <div className="card" style={{ marginBottom: 18 }}>
+        <div className="sectionTitle">Ajouter une personne</div>
+        <form onSubmit={onAdd} style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(6,minmax(0,1fr))" }}>
+          <input className="input" placeholder="Prénom" value={firstName}  onChange={(e)=>setFirst(e.target.value)} />
+          <input className="input" placeholder="Nom"    value={lastName}   onChange={(e)=>setLast(e.target.value)} />
+          <input className="input" placeholder="Téléphone" value={phone}  onChange={(e)=>setPhone(e.target.value)} />
+          <select className="select" value={type} onChange={(e)=>setType(e.target.value)}>
+            <option value="offre">Offre</option>
+            <option value="demande">Demande</option>
+          </select>
+          <input className="input" placeholder="Compétences (ex: couture, tricot)" value={skills} onChange={(e)=>setSkills(e.target.value)} />
+          <button className="btn" disabled={adding}>{adding ? "Ajout…" : "Ajouter"}</button>
+        </form>
+      </div>
 
-      {/* Correspondances */}
-      <div style={styles.card}>
-        <h2 style={styles.h2}>Correspondances (offre ↔ demande)</h2>
-        {!matches.length ? (
-          <div style={{ color: "#666" }}>Aucune correspondance trouvée pour l’instant.</div>
-        ) : (
-          <div style={{ display: "grid", gap: 12 }}>
-            {matches.map((m, idx) => {
-              const tD = tone("demande");
-              return (
-                <div key={idx} style={{ border: "1px solid #f1e3a0", background: "#fff9d6", borderRadius: 10, padding: 12 }}>
-                  <div style={{ marginBottom: 8, fontWeight: 600 }}>Demande</div>
-                  <div style={{ background: tD.bg, border: `1px solid ${tD.bd}`, borderRadius: 8, padding: 10, marginBottom: 8 }}>
-                    <div><b>{m.demande.firstName} {m.demande.lastName}</b> • {fmtPhone(m.demande.phone)}</div>
-                    <div style={{ color: "#444" }}>{m.demande.skills}</div>
-                  </div>
-                  <div style={{ marginBottom: 6, fontWeight: 600 }}>Offres compatibles</div>
-                  <div style={{ display: "grid", gap: 8 }}>
-                    {m.offres.map(({ o, score }) => {
-                      const tO = tone("offre");
-                      return (
-                        <div key={o.id} style={{ background: tO.bg, border: `1px solid ${tO.bd}`, borderRadius: 8, padding: 10 }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                            <div><b>{o.firstName} {o.lastName}</b> • {fmtPhone(o.phone)}</div>
-                            <span style={{ ...styles.chip, background: "#fff", borderColor: "#eccb4e" }}>
-                              Similarité {(score * 100).toFixed(0)}%
-                            </span>
-                          </div>
-                          <div style={{ color: "#444", marginTop: 4 }}>{o.skills}</div>
-                        </div>
-                      );
-                    })}
-                  </div>
+      <div className="sectionTitle">Réseau par compétence</div>
+
+      {groups.map((g) => {
+        const bg = colorForSkill(g.skill);
+        const bc = borderColorForSkill(g.skill);
+        const matchCount = Math.min(g.offres.length, g.demandes.length);
+        return (
+          <div className="group" key={g.skill} style={{ borderColor: bc, background: bg }}>
+            <div className="groupHeader">
+              <div className="skillSwatch" style={{ background: bc }} />
+              <strong>{g.skill}</strong>
+              <span className="badge">Offres: {g.offres.length}</span>
+              <span className="badge">Demandes: {g.demandes.length}</span>
+              {matchCount > 0 && <span className="badge">Matchs possibles: {matchCount}</span>}
+            </div>
+
+            <div className="columns">
+              <div>
+                <div className="columnTitle">Offres</div>
+                <div className="bubbles">
+                  {g.offres.map((e) => (
+                    <div
+                      key={e.id}
+                      className="bubble offre"
+                      style={{ background: bg, borderColor: bc }}
+                      title={e.skills}
+                    >
+                      <span className="name">{e.firstName} {e.lastName}</span>
+                      <span className="phone">{e.phone}</span>
+                      <span className="skillTag">{primarySkill(e.skills)}</span>
+                      <button
+                        className="del"
+                        onClick={() => onDelete(e.id)}
+                        disabled={deletingId === e.id}
+                        aria-label="Supprimer"
+                        title="Supprimer"
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  ))}
                 </div>
-              );
-            })}
-          </div>
-        )}
-        <div style={{ marginTop: 10, fontSize: 12, color: "#666" }}>
-          L’algorithme compare les mots clés (Jaccard). Ajuste ta recherche ou le seuil dans le code si besoin.
-        </div>
-      </div>
+              </div>
 
-      {/* Tableau des entrées */}
-      <div style={styles.card}>
-        <h2 style={styles.h2}>Toutes les entrées ({filtered.length})</h2>
-        {loading ? (
-          <div>Chargement…</div>
-        ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={styles.table}>
-              <thead>
-                <tr>
-                  <th style={styles.th}>Type</th>
-                  <th style={styles.th}>Nom</th>
-                  <th style={styles.th}>Téléphone</th>
-                  <th style={styles.th}>Compétences</th>
-                  <th style={styles.th}>Créé</th>
-                  <th style={styles.th}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map(e => {
-                  const t = tone(e.type);
-                  return (
-                    <tr key={e.id} style={{ background: e.type === "offre" ? t.bg : e.type === "demande" ? t.bg : "transparent" }}>
-                      <td style={styles.td}>
-                        <span style={{ ...styles.chip, background: "#fff", borderColor: t.bd }}>{e.type}</span>
-                      </td>
-                      <td style={styles.td}><b>{e.firstName} {e.lastName}</b></td>
-                      <td style={styles.td}>{fmtPhone(e.phone)}</td>
-                      <td style={styles.td}>{e.skills}</td>
-                      <td style={styles.td}>{new Date(e.createdAt).toLocaleString("fr-FR")}</td>
-                      <td style={styles.td}>
-                        <button
-                          onClick={() => handleDelete(e.id)}
-                          style={{ ...styles.btnGhost, borderColor: "#e33", color: "#e33" }}
-                          title="Supprimer"
-                          disabled={busy}
-                        >
-                          Supprimer
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-                {!filtered.length && (
-                  <tr><td style={styles.td} colSpan={6}>&nbsp;Aucune donnée.</td></tr>
-                )}
-              </tbody>
-            </table>
+              <div>
+                <div className="columnTitle">Demandes</div>
+                <div className="bubbles">
+                  {g.demandes.map((e) => (
+                    <div
+                      key={e.id}
+                      className="bubble demande"
+                      style={{ background: bg, borderColor: bc, borderStyle: "dashed" }}
+                      title={e.skills}
+                    >
+                      <span className="name">{e.firstName} {e.lastName}</span>
+                      <span className="phone">{e.phone}</span>
+                      <span className="skillTag">{primarySkill(e.skills)}</span>
+                      <button
+                        className="del"
+                        onClick={() => onDelete(e.id)}
+                        disabled={deletingId === e.id}
+                        aria-label="Supprimer"
+                        title="Supprimer"
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
           </div>
-        )}
-        <div style={{ marginTop: 8, fontSize: 12, color: "#666" }}>
-          <span style={{ ...styles.chip, background: tone("offre").bg, borderColor: tone("offre").bd }}>Offre</span>{" "}
-          <span style={{ ...styles.chip, background: tone("demande").bg, borderColor: tone("demande").bd }}>Demande</span>{" "}
-          <span style={{ ...styles.chip, background: "#fff9d6", borderColor: "#f1e3a0" }}>Correspondance</span>
-        </div>
-      </div>
+        );
+      })}
+
+      {groups.length === 0 && (
+        <div className="small">Aucune entrée pour le moment.</div>
+      )}
     </div>
   );
 }
