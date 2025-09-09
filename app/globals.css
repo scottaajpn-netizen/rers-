@@ -1,0 +1,42 @@
+/* app/globals.css */
+
+.container { max-width: 1100px; margin: 0 auto; padding: 24px; }
+.toolbar { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:16px; }
+.btn { padding:10px 14px; border:1px solid #ddd; border-radius:10px; cursor:pointer; background:#fff; }
+.btn:disabled { opacity:.6; cursor:not-allowed; }
+.input { padding:10px 12px; border:1px solid #ddd; border-radius:10px; min-width: 180px; }
+.select { padding:10px 12px; border:1px solid #ddd; border-radius:10px; }
+
+.group {
+  border: 1px solid #eee; border-radius:16px; padding:14px; margin-bottom:16px;
+  background: #fafafa;
+}
+.groupHeader { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+.skillSwatch { width:14px; height:14px; border-radius:50%; border:1px solid rgba(0,0,0,.15); }
+.columns { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+.columnTitle { font-size:13px; opacity:.7; margin-bottom:6px; }
+
+.bubbles { display:flex; flex-wrap:wrap; gap:8px; }
+
+.bubble {
+  display:inline-flex; align-items:center; gap:8px;
+  padding:10px 12px; border-radius:999px; background:#eee;
+  border:2px solid transparent;
+  box-shadow: 0 1px 0 rgba(0,0,0,.03);
+  font-size:14px;
+}
+.bubble.offre   { border-style: solid; }
+.bubble.demande { border-style: dashed; }
+.bubble .name   { font-weight:600; }
+.bubble .phone  { opacity:.8; font-variant-numeric: tabular-nums; }
+.bubble .skillTag { font-size:12px; opacity:.85; padding:2px 8px; border-radius:999px; background:rgba(255,255,255,.4); border:1px solid rgba(0,0,0,.08); }
+.bubble .del { border:none; background:transparent; cursor:pointer; opacity:.7; }
+.bubble .del:hover { opacity:1 }
+
+.sectionTitle { margin: 18px 0 8px; font-size:18px; }
+
+.card { border:1px solid #eee; border-radius:16px; padding:16px; background:#fff; box-shadow: 0 2px 0 rgba(0,0,0,.02); }
+.hr { height:1px; background:#eee; margin:16px 0; }
+.small { font-size:12px; opacity:.7; }
+
+.badge { padding:4px 8px; border:1px solid #ddd; border-radius:999px; font-size:12px; background:#fff; }
