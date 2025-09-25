@@ -66,4 +66,34 @@ export async function POST(req) {
     lastName: String(body.lastName || '').trim(),
     phone: String(body.phone || '').trim(),
     items: Array.isArray(body.items)
-      ? body
+      ? body.items
+          .map(it => ({
+            type: it?.type === 'demande' ? 'demande' : 'offre',
+            skill: String(it?.skill || '').trim(),
+          }))
+          .filter(it => it.skill)
+      : [],
+    createdAt: new Date().toISOString(),
+  };
+
+  data.entries.unshift(entry);
+  await saveData(data);
+  return json({ ok: true, entry });
+}
+
+// DELETE: suppression par id (?id=xxx)
+export async function DELETE(req) {
+  if (!isAdmin(req)) return json({ error: 'Unauthorized' }, 401);
+
+  const { searchParams } = new URL(req.url);
+  const id = searchParams.get('id') || '';
+  if (!id) return json({ error: 'Missing id' }, 400);
+
+  const data = await loadData();
+  const before = data.entries.length;
+  data.entries = data.entries.filter(e => e.id !== id);
+  if (data.entries.length === before) return json({ error: 'Not found' }, 404);
+
+  await saveData(data);
+  return json({ ok: true });
+}
