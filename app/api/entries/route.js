@@ -1,99 +1,145 @@
-import { list, put } from '@vercel/blob';
+// app/api/entries/route.js
+import { list, put } from "@vercel/blob";
 
-export const runtime = 'edge';
+export const runtime = "edge";
+const KEY = "rers/data.json";
 
-const KEY = 'rers/data.json';
-const ADMIN = '87800'; // mot de passe admin
+// --- helpers ---
+async function ensureFile() {
+  const { blobs } = await list({ prefix: KEY, limit: 1000 });
+  const exact = blobs.find(b => b.pathname === KEY);
+  if (!exact) {
+    const init = { entries: [] };
+    const res = await put(KEY, JSON.stringify(init, null, 2), {
+      access: "public",
+      contentType: "application/json",
+      addRandomSuffix: false, // IMPORTANT : réécrit le même chemin
+    });
+    return { url: res.url, entries: [] };
+  }
+  // Toujours lire sans cache
+  const resp = await fetch(exact.url, { cache: "no-store" });
+  if (!resp.ok) return { url: exact.url, entries: [] };
+  const json = await resp.json().catch(() => ({ entries: [] }));
+  const entries = Array.isArray(json.entries) ? json.entries : [];
+  return { url: exact.url, entries };
+}
+
+function normalizeEntry(e) {
+  // Si déjà au nouveau format
+  if (Array.isArray(e.items)) {
+    return {
+      id: String(e.id || ""),
+      firstName: String(e.firstName || "").trim(),
+      lastName: String(e.lastName || "").trim(),
+      phone: String(e.phone || "").trim(),
+      items: e.items
+        .filter(it => it && it.type && it.skill)
+        .map(it => ({
+          type: String(it.type).toLowerCase() === "offre" ? "offre" : "demande",
+          skill: String(it.skill).trim(),
+        })),
+      createdAt: e.createdAt || new Date().toISOString(),
+    };
+  }
+
+  // Ancien format : { type: "offre|demande", skills: "A, B, C" }
+  const legacyType = String(e.type || "").toLowerCase();
+  const baseType = legacyType.includes("offre") ? "offre" : "demande";
+  const skillsRaw = String(e.skills || "");
+  const skills = skillsRaw
+    .split(/[,;|]/g)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  return {
+    id: String(e.id || ""),
+    firstName: String(e.firstName || "").trim(),
+    lastName: String(e.lastName || "").trim(),
+    phone: String(e.phone || "").trim(),
+    items: skills.map(skill => ({ type: baseType, skill })),
+    createdAt: e.createdAt || new Date().toISOString(),
+  };
+}
 
 function isAdmin(req) {
-  const token = req.headers.get('x-admin-token') || '';
-  return token === ADMIN;
+  // On garde le même "mot de passe" que sur la page : 87800
+  return req.headers.get("x-admin-token") === "87800";
 }
 
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
-}
-
-// Charge le JSON (le crée en public s'il n'existe pas)
-async function loadData() {
-  const { blobs } = await list({ prefix: KEY });
-  if (!blobs.length) {
-    const initial = { entries: [] };
-    await put(KEY, JSON.stringify(initial, null, 2), {
-      access: 'public',                // << IMPORTANT
-      contentType: 'application/json',
-      addRandomSuffix: false,          // << on garde le nom fixe
-      token: process.env.BLOB_READ_WRITE_TOKEN,
-    });
-    return initial;
-  }
-  const url = blobs[0].url;
-  const res = await fetch(url, { cache: 'no-store' });
-  const data = await res.json().catch(() => ({ entries: [] }));
-  if (!Array.isArray(data.entries)) data.entries = [];
-  return data;
-}
-
-// Sauvegarde le JSON (toujours en public)
-async function saveData(data) {
-  await put(KEY, JSON.stringify(data, null, 2), {
-    access: 'public',                  // << IMPORTANT
-    contentType: 'application/json',
-    addRandomSuffix: false,
-    token: process.env.BLOB_READ_WRITE_TOKEN,
-  });
-}
-
-// GET: liste des entrées
+// --- GET : lire toutes les entrées (avec conversion auto) ---
 export async function GET() {
-  const data = await loadData();
-  return json({ entries: data.entries });
+  const { entries } = await ensureFile();
+  const normalized = entries.map(normalizeEntry);
+  // Tri du plus récent au plus ancien (optionnel)
+  normalized.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  return new Response(JSON.stringify({ entries: normalized }, null, 2), {
+    headers: { "content-type": "application/json", "cache-control": "no-store" },
+    status: 200,
+  });
 }
 
-// POST: ajout d'une entrée
+// --- POST : ajouter une entrée ---
 export async function POST(req) {
-  if (!isAdmin(req)) return json({ error: 'Unauthorized' }, 401);
-
+  if (!isAdmin(req)) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
+  }
   const body = await req.json().catch(() => ({}));
-  const data = await loadData();
+  const { url, entries } = await ensureFile();
+
+  const safeItems = Array.isArray(body.items)
+    ? body.items
+        .filter(it => it && it.type && it.skill)
+        .map(it => ({
+          type: String(it.type).toLowerCase() === "offre" ? "offre" : "demande",
+          skill: String(it.skill).trim(),
+        }))
+    : [];
 
   const entry = {
-    id: String(Date.now()) + '-' + Math.random().toString(36).slice(2, 7),
-    firstName: String(body.firstName || '').trim(),
-    lastName: String(body.lastName || '').trim(),
-    phone: String(body.phone || '').trim(),
-    items: Array.isArray(body.items)
-      ? body.items
-          .map(it => ({
-            type: it?.type === 'demande' ? 'demande' : 'offre',
-            skill: String(it?.skill || '').trim(),
-          }))
-          .filter(it => it.skill)
-      : [],
+    id: String(Date.now()) + "-" + Math.random().toString(36).slice(2, 7),
+    firstName: String(body.firstName || "").trim(),
+    lastName: String(body.lastName || "").trim(),
+    phone: String(body.phone || "").trim(),
+    items: safeItems,
     createdAt: new Date().toISOString(),
   };
 
-  data.entries.unshift(entry);
-  await saveData(data);
-  return json({ ok: true, entry });
+  const next = [entry, ...entries];
+  await put(KEY, JSON.stringify({ entries: next }, null, 2), {
+    access: "public",
+    contentType: "application/json",
+    addRandomSuffix: false,
+  });
+
+  return new Response(JSON.stringify({ ok: true, entry }, null, 2), {
+    headers: { "content-type": "application/json" },
+    status: 200,
+  });
 }
 
-// DELETE: suppression par id (?id=xxx)
+// --- DELETE : supprimer une entrée par id ---
 export async function DELETE(req) {
-  if (!isAdmin(req)) return json({ error: 'Unauthorized' }, 401);
-
+  if (!isAdmin(req)) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
+  }
   const { searchParams } = new URL(req.url);
-  const id = searchParams.get('id') || '';
-  if (!id) return json({ error: 'Missing id' }, 400);
+  const id = searchParams.get("id");
+  if (!id) {
+    return new Response(JSON.stringify({ error: "Missing id" }), { status: 400 });
+  }
 
-  const data = await loadData();
-  const before = data.entries.length;
-  data.entries = data.entries.filter(e => e.id !== id);
-  if (data.entries.length === before) return json({ error: 'Not found' }, 404);
+  const { entries } = await ensureFile();
+  const next = entries.filter(e => String(e.id) !== String(id));
 
-  await saveData(data);
-  return json({ ok: true });
+  await put(KEY, JSON.stringify({ entries: next }, null, 2), {
+    access: "public",
+    contentType: "application/json",
+    addRandomSuffix: false,
+  });
+
+  return new Response(JSON.stringify({ ok: true }, null, 2), {
+    headers: { "content-type": "application/json" },
+    status: 200,
+  });
 }
