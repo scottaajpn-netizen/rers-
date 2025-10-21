@@ -103,3 +103,62 @@ export async function DELETE(req) {
   await del(target.url);
   return ok({ ok: true });
 }
+// --- METTRE À JOUR UNE FICHE EXISTANTE (PATCH) ---
+export async function PATCH(req) {
+  if (!isAdmin(req)) return err("Unauthorized", 401);
+
+  const url = new URL(req.url);
+  let id = url.searchParams.get("id") || "";
+
+  if (!id) return err("Missing id", 400);
+
+  const path = `${PREFIX}${id}.json`;
+
+  // Vérifie si la fiche existe déjà
+  const { blobs } = await list({ prefix: path, limit: 1 });
+  const target = blobs?.[0] && blobs[0].pathname === path ? blobs[0] : null;
+  if (!target) return err("Not found", 404);
+
+  // Charge la fiche actuelle
+  let current = {};
+  try {
+    const res = await fetch(target.url, { cache: "no-store" });
+    if (res.ok) current = await res.json();
+  } catch {}
+
+  // Lit les nouvelles données envoyées par le site
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return err("Invalid JSON");
+  }
+
+  // Met à jour les champs
+  const items = Array.isArray(body.items)
+    ? body.items
+        .map((it) => ({
+          type: it?.type === "offre" ? "offre" : "demande",
+          skill: String(it?.skill || "").trim(),
+        }))
+        .filter((it) => it.skill)
+    : current.items || [];
+
+  const entry = {
+    ...current,
+    firstName: String(body.firstName || current.firstName || "").trim(),
+    lastName: String(body.lastName || current.lastName || "").trim(),
+    phone: String(body.phone || current.phone || "").trim(),
+    items,
+    updatedAt: new Date().toISOString(),
+  };
+
+  // Enregistre la nouvelle version (remplace l’ancien fichier)
+  await put(path, JSON.stringify(entry), {
+    access: "public",
+    contentType: "application/json; charset=utf-8",
+  });
+
+  return ok(entry, 200);
+}
+
