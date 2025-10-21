@@ -149,6 +149,46 @@ export default function Page() {
     } catch (e) { console.error(e); setError("Erreur suppression."); }
     finally { setBusy(false); }
   }
+  async function saveEdit() {
+  if (!editing) return;
+  setBusy(true);
+  setError("");
+  try {
+    const cleanItems = (editing.items || [])
+      .map(it => ({
+        type: it.type === "offre" ? "offre" : "demande",
+        skill: String(it.skill || "").trim()
+      }))
+      .filter(it => it.skill);
+
+    const body = {
+      firstName: editing.firstName.trim(),
+      lastName: editing.lastName.trim(),
+      phone: editing.phone.trim(),
+      items: cleanItems
+    };
+
+    const res = await fetch(`/api/entries?id=${encodeURIComponent(editing.id)}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "x-admin-token": ADMIN_TOKEN
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) throw new Error(await res.text());
+    await fetchEntries();
+    pop("Fiche mise à jour ✅");
+    setEditing(null);
+  } catch (e) {
+    console.error(e);
+    setError("Erreur mise à jour.");
+  } finally {
+    setBusy(false);
+  }
+}
+
 
   async function handleExport() {
     try {
