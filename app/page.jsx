@@ -26,8 +26,11 @@ export default function Page() {
   const [items, setItems]         = useState([{ type: "offre", skill: "" }]);
 
   // édition inline (dans la liste)
-  const [inlineEditId, setInlineEditId] = useState(null); // id en édition
-  const [inlineDraft, setInlineDraft]   = useState(null); // { id, firstName, lastName, phone, items:[] }
+  const [inlineEditId, setInlineEditId] = useState(null);
+  const [inlineDraft, setInlineDraft]   = useState(null);
+
+  // popup “détail bulle”
+  const [detailSkill, setDetailSkill] = useState(null); // { skill, offers:[entry], demands:[entry] }
 
   function pop(msg) { setToast(msg); setTimeout(() => setToast(""), 1600); }
 
@@ -239,19 +242,55 @@ export default function Page() {
     return byQuick(bySearch(entries));
   }, [entries, search, quickFilter]);
 
-  // Agrégations bulles (mix offres/demandes)
-  const bubbles = useMemo(() => {
+  // ---- agrégations pour bulles et popup ----
+  const skillMap = useMemo(() => {
+    // Map skill(lower) -> { skill, offers:[entry], demands:[entry] }
     const map = new Map();
     for (const e of entries) {
       for (const it of e.items || []) {
         const key = (it.skill || "").trim().toLowerCase();
+        const label = (it.skill || "").trim();
         if (!key) continue;
-        if (!map.has(key)) map.set(key, { skill: it.skill, offres: 0, demandes: 0 });
+        if (!map.has(key)) map.set(key, { skill: label, offers: [], demands: [] });
         const b = map.get(key);
-        if (it.type === "offre") b.offres++; else b.demandes++;
+        (it.type === "offre" ? b.offers : b.demands).push(e);
       }
     }
-    return Array.from(map.values()).sort((a, b) => (b.offres + b.demandes) - (a.offres + a.demandes));
+    return map;
+  }, [entries]);
+
+  const bubbles = useMemo(() => {
+    const arr = Array.from(skillMap.values()).map((x) => {
+      const total = x.offers.length + x.demands.length;
+      const size = Math.max(84, Math.min(168, 64 + Math.sqrt(total) * 18));
+      const kind = x.offers.length && x.demands.length ? "mix" : x.offers.length ? "offre" : "demande";
+      return { ...x, total, size, kind };
+    });
+    arr.sort((a, b) => b.total - a.total);
+    return arr;
+  }, [skillMap]);
+
+  // ---- agrégations “Stats” (top barres) ----
+  const { topOffers, topDemands, maxOffer, maxDemand } = useMemo(() => {
+    const offers = new Map();
+    const demands = new Map();
+    for (const e of entries) {
+      for (const it of e.items || []) {
+        const key = (it.skill || "").trim();
+        if (!key) continue;
+        if (it.type === "offre") offers.set(key, (offers.get(key) || 0) + 1);
+        else demands.set(key, (demands.get(key) || 0) + 1);
+      }
+    }
+    const toArray = (m) => Array.from(m.entries()).map(([skill, count]) => ({ skill, count }));
+    const so = toArray(offers).sort((a,b)=>b.count-a.count);
+    const sd = toArray(demands).sort((a,b)=>b.count-a.count);
+    return {
+      topOffers: so.slice(0, 15),
+      topDemands: sd.slice(0, 15),
+      maxOffer: so[0]?.count || 1,
+      maxDemand: sd[0]?.count || 1,
+    };
   }, [entries]);
 
   return (
@@ -269,6 +308,7 @@ export default function Page() {
           <div className="rers-seg">
             <button className={view === "list" ? "on" : ""} onClick={() => setView("list")}>Liste</button>
             <button className={view === "bubbles" ? "on" : ""} onClick={() => setView("bubbles")}>Bulles</button>
+            <button className={view === "stats" ? "on" : ""} onClick={() => setView("stats")}>Stats</button>
           </div>
           <div className="rers-seg">
             <button className={quickFilter === "all" ? "on" : ""} onClick={() => setQuickFilter("all")}>Tout</button>
@@ -346,7 +386,6 @@ export default function Page() {
                   const offers = (e.items || []).filter((it) => it.type === "offre").map((it) => it.skill);
                   const demands = (e.items || []).filter((it) => it.type === "demande").map((it) => it.skill);
 
-                  // Ligne en mode édition inline ?
                   const isEditing = inlineEditId === e.id;
 
                   return (
@@ -432,29 +471,110 @@ export default function Page() {
       {/* Bulles */}
       {view === "bubbles" && (
         <section className="card">
-          <div className="cardHead"><h2>Bulles par compétence</h2><span className="hint">Clique pour filtrer la liste</span></div>
+          <div className="cardHead"><h2>Bulles par compétence</h2><span className="hint">Clique une bulle pour voir les personnes</span></div>
           <div className="bubblesGrid">
-            {bubbles.map((b) => {
-              const total = b.offres + b.demandes;
-              const size = Math.max(84, Math.min(168, 64 + Math.sqrt(total) * 18));
-              const kind = b.offres && b.demandes ? "mix" : b.offres ? "offre" : "demande";
-              return (
-                <div
-                  key={b.skill}
-                  className={`bubble ${kind}`}
-                  style={{ width: size, height: size, cursor:"pointer" }}
-                  title={`${b.skill} • ${b.offres} off. · ${b.demandes} dem.`}
-                  onClick={() => { setSearch(b.skill); setView("list"); }}
-                >
-                  <div className="bLbl">
-                    <div className="bTitle">{b.skill}</div>
-                    <div className="bMeta">{b.offres} · {b.demandes}</div>
-                  </div>
+            {bubbles.map((b) => (
+              <div
+                key={b.skill}
+                className={`bubble ${b.kind}`}
+                style={{ width: b.size, height: b.size, cursor:"pointer" }}
+                title={`${b.skill} • ${b.offers.length} off. · ${b.demands.length} dem.`}
+                onClick={() => setDetailSkill({
+                  skill: b.skill,
+                  offers: b.offers,
+                  demands: b.demands
+                })}
+              >
+                <div className="bLbl">
+                  <div className="bTitle">{b.skill}</div>
+                  <div className="bMeta">{b.offers.length} · {b.demands.length}</div>
                 </div>
-              );
-            })}
+              </div>
+            ))}
           </div>
         </section>
+      )}
+
+      {/* Stats (barres) */}
+      {view === "stats" && (
+        <section className="card">
+          <div className="cardHead">
+            <h2>Stats visuelles</h2>
+            <span className="hint">Top 15 par popularité</span>
+          </div>
+          <div className="grid2">
+            <div>
+              <h3>Top — Offres</h3>
+              <div className="bars">
+                {topOffers.map(({ skill, count }) => {
+                  const pct = Math.round((count / (maxOffer || 1)) * 100);
+                  return (
+                    <div key={`bo-${skill}`} className="barRow">
+                      <div className="barLabel">{skill}</div>
+                      <div className="barOuter"><div className="barInner off" style={{ width: `${pct}%` }} /></div>
+                      <div className="barCount">{count}</div>
+                    </div>
+                  );
+                })}
+                {!topOffers.length && <div className="muted">Aucune donnée.</div>}
+              </div>
+            </div>
+            <div>
+              <h3>Top — Demandes</h3>
+              <div className="bars">
+                {topDemands.map(({ skill, count }) => {
+                  const pct = Math.round((count / (maxDemand || 1)) * 100);
+                  return (
+                    <div key={`bd-${skill}`} className="barRow">
+                      <div className="barLabel">{skill}</div>
+                      <div className="barOuter"><div className="barInner dem" style={{ width: `${pct}%` }} /></div>
+                      <div className="barCount">{count}</div>
+                    </div>
+                  );
+                })}
+                {!topDemands.length && <div className="muted">Aucune donnée.</div>}
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Popup détail bulle */}
+      {detailSkill && (
+        <div className="modal" onClick={() => setDetailSkill(null)}>
+          <div className="modalInner" onClick={(e) => e.stopPropagation()}>
+            <div className="dHead">
+              <h3>{detailSkill.skill}</h3>
+              <button className="icon" onClick={() => setDetailSkill(null)}>✕</button>
+            </div>
+            <div className="cols" style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+              <div>
+                <div className="colTitle">Offres ({detailSkill.offers.length})</div>
+                {detailSkill.offers.length ? (
+                  <ul className="list">
+                    {detailSkill.offers.map((e) => (
+                      <li key={`o-${e.id}`}>
+                        <strong>{e.lastName} {e.firstName}</strong> <span className="muted">— {e.phone || "—"}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : <div className="muted">Aucune offre</div>}
+              </div>
+              <div>
+                <div className="colTitle">Demandes ({detailSkill.demands.length})</div>
+                {detailSkill.demands.length ? (
+                  <ul className="list">
+                    {detailSkill.demands.map((e) => (
+                      <li key={`d-${e.id}`}>
+                        <strong>{e.lastName} {e.firstName}</strong> <span className="muted">— {e.phone || "—"}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : <div className="muted">Aucune demande</div>}
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {toast && <div className="toast">{toast}</div>}
