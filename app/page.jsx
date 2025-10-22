@@ -17,6 +17,7 @@ export default function Page() {
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [search, setSearch] = useState("");
+  const [quickFilter, setQuickFilter] = useState("all"); // "all" | "offre" | "demande"
 
   // création
   const [firstName, setFirstName] = useState("");
@@ -24,8 +25,9 @@ export default function Page() {
   const [phone, setPhone]         = useState("");
   const [items, setItems]         = useState([{ type: "offre", skill: "" }]);
 
-  // édition (popup)
-  const [editingEntry, setEditingEntry] = useState(null); // { id, firstName, lastName, phone, items:[] }
+  // édition inline (dans la liste)
+  const [inlineEditId, setInlineEditId] = useState(null); // id en édition
+  const [inlineDraft, setInlineDraft]   = useState(null); // { id, firstName, lastName, phone, items:[] }
 
   function pop(msg) { setToast(msg); setTimeout(() => setToast(""), 1600); }
 
@@ -63,6 +65,36 @@ export default function Page() {
     } catch (e) {
       console.error(e);
       setError("Export impossible.");
+    }
+  }
+
+  // ---- export CSV ----
+  function handleExportCSV() {
+    try {
+      const escape = (s) => `"${String(s || "").replace(/"/g, '""')}"`;
+      const flat = entries.map(e => ({
+        id: e.id,
+        nom: `${e.lastName || ""} ${e.firstName || ""}`.trim(),
+        tel: e.phone || "",
+        offres: (e.items||[]).filter(i => i.type === "offre").map(i => i.skill).join(", "),
+        demandes: (e.items||[]).filter(i => i.type === "demande").map(i => i.skill).join(", ")
+      }));
+      const headers = Object.keys(flat[0] || { id:"", nom:"", tel:"", offres:"", demandes:"" });
+      const lines = [
+        headers.join(";"),
+        ...flat.map(r => headers.map(h => escape(r[h])).join(";"))
+      ].join("\n");
+      const blob = new Blob([lines], { type:"text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `rers-export-${new Date().toISOString().slice(0,19).replace(/[:T]/g,"-")}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      pop("Export CSV prêt 📋");
+    } catch (e) {
+      console.error(e);
+      setError("Export CSV impossible.");
     }
   }
 
@@ -122,9 +154,10 @@ export default function Page() {
     }
   }
 
-  // ---- édition ----
-  function startEdit(e) {
-    setEditingEntry({
+  // ---- édition inline ----
+  function startInlineEdit(e) {
+    setInlineEditId(e.id);
+    setInlineDraft({
       id: e.id,
       firstName: e.firstName || "",
       lastName:  e.lastName  || "",
@@ -132,39 +165,51 @@ export default function Page() {
       items: Array.isArray(e.items) && e.items.length ? e.items.map(it => ({ type: it.type, skill: it.skill })) : [{ type: "offre", skill: "" }]
     });
   }
+  function cancelInlineEdit() {
+    setInlineEditId(null);
+    setInlineDraft(null);
+  }
+  function updateDraftItem(i, patch) {
+    setInlineDraft(d => ({ ...d, items: d.items.map((it, idx) => idx === i ? { ...it, ...patch } : it) }));
+  }
+  function addDraftItem() {
+    setInlineDraft(d => ({ ...d, items: [...d.items, { type:"demande", skill:"" }] }));
+  }
+  function removeDraftItem(i) {
+    setInlineDraft(d => ({ ...d, items: d.items.filter((_, idx) => idx !== i) }));
+  }
 
-  async function handleEdit(ev) {
-    ev.preventDefault();
-    if (!editingEntry) return;
+  async function saveInlineEdit() {
+    if (!inlineDraft) return;
     setBusy(true);
     setError("");
     try {
-      const cleanItems = (editingEntry.items || [])
+      const cleanItems = (inlineDraft.items || [])
         .map(it => ({ type: it.type === "offre" ? "offre" : "demande", skill: String(it.skill || "").trim() }))
         .filter(it => it.skill);
 
-      if (!editingEntry.firstName.trim() || !editingEntry.lastName.trim() || !cleanItems.length) {
+      if (!inlineDraft.firstName.trim() || !inlineDraft.lastName.trim() || !cleanItems.length) {
         setError("Prénom, Nom et au moins une compétence sont requis.");
         setBusy(false);
         return;
       }
 
       const body = {
-        firstName: editingEntry.firstName.trim(),
-        lastName:  editingEntry.lastName.trim(),
-        phone:     editingEntry.phone.trim(),
+        firstName: inlineDraft.firstName.trim(),
+        lastName:  inlineDraft.lastName.trim(),
+        phone:     inlineDraft.phone.trim(),
         items:     cleanItems,
       };
 
-      // PATCH sur la même route, avec l'id en query
-      const res = await fetch(`/api/entries?id=${encodeURIComponent(editingEntry.id)}`, {
+      const res = await fetch(`/api/entries?id=${encodeURIComponent(inlineDraft.id)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", "x-admin-token": ADMIN_TOKEN },
         body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error(await res.text());
 
-      setEditingEntry(null);
+      setInlineEditId(null);
+      setInlineDraft(null);
       await fetchEntries();
       pop("Fiche modifiée ✅");
     } catch (e) {
@@ -175,39 +220,26 @@ export default function Page() {
     }
   }
 
-  // ---- recherche & agrégations ----
+  // ---- recherche + filtres ----
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return entries;
-    return entries.filter((e) =>
-      `${e.firstName} ${e.lastName} ${e.phone}`.toLowerCase().includes(q) ||
-      (Array.isArray(e.items) && e.items.some((it) => `${it.type} ${it.skill}`.toLowerCase().includes(q)))
-    );
-  }, [entries, search]);
+    const bySearch = (arr) => {
+      if (!q) return arr;
+      return arr.filter((e) =>
+        `${e.firstName} ${e.lastName} ${e.phone}`.toLowerCase().includes(q) ||
+        (Array.isArray(e.items) && e.items.some((it) => `${it.type} ${it.skill}`.toLowerCase().includes(q)))
+      );
+    };
+    const byQuick = (arr) => {
+      if (quickFilter === "all") return arr;
+      return arr.filter((e) =>
+        (e.items || []).some((it) => it.type === quickFilter)
+      );
+    };
+    return byQuick(bySearch(entries));
+  }, [entries, search, quickFilter]);
 
-  // Agrégations globales (offres/demandes séparées)
-  const { cloudOffers, cloudDemands, topOffers, topDemands, maxOffer, maxDemand } = useMemo(() => {
-    const offers = new Map();
-    const demands = new Map();
-    for (const e of entries) {
-      for (const it of e.items || []) {
-        const key = (it.skill || "").trim();
-        if (!key) continue;
-        if (it.type === "offre") offers.set(key, (offers.get(key) || 0) + 1);
-        else demands.set(key, (demands.get(key) || 0) + 1);
-      }
-    }
-    const toArray = (m) => Array.from(m.entries()).map(([skill, count]) => ({ skill, count }));
-    const cloudOffers = toArray(offers).sort((a,b)=>b.count-a.count);
-    const cloudDemands = toArray(demands).sort((a,b)=>b.count-a.count);
-    const maxOffer = cloudOffers[0]?.count || 1;
-    const maxDemand = cloudDemands[0]?.count || 1;
-    const topOffers = cloudOffers.slice(0, 15);
-    const topDemands = cloudDemands.slice(0, 15);
-    return { cloudOffers, cloudDemands, topOffers, topDemands, maxOffer, maxDemand };
-  }, [entries]);
-
-  // Bulles (mix offres/demandes)
+  // Agrégations bulles (mix offres/demandes)
   const bubbles = useMemo(() => {
     const map = new Map();
     for (const e of entries) {
@@ -237,10 +269,15 @@ export default function Page() {
           <div className="rers-seg">
             <button className={view === "list" ? "on" : ""} onClick={() => setView("list")}>Liste</button>
             <button className={view === "bubbles" ? "on" : ""} onClick={() => setView("bubbles")}>Bulles</button>
-            <button className={view === "stats" ? "on" : ""} onClick={() => setView("stats")}>Stats</button>
+          </div>
+          <div className="rers-seg">
+            <button className={quickFilter === "all" ? "on" : ""} onClick={() => setQuickFilter("all")}>Tout</button>
+            <button className={quickFilter === "offre" ? "on" : ""} onClick={() => setQuickFilter("offre")}>Offres</button>
+            <button className={quickFilter === "demande" ? "on" : ""} onClick={() => setQuickFilter("demande")}>Demandes</button>
           </div>
           <button className="btn ghost" onClick={fetchEntries}>{loading ? "…" : "Recharger"}</button>
-          <button className="btn" onClick={handleExport}>Exporter</button>
+          <button className="btn" onClick={handleExport}>Export JSON</button>
+          <button className="btn" onClick={handleExportCSV}>Export CSV</button>
         </div>
       </header>
 
@@ -308,20 +345,78 @@ export default function Page() {
                 {!loading && filtered.map((e) => {
                   const offers = (e.items || []).filter((it) => it.type === "offre").map((it) => it.skill);
                   const demands = (e.items || []).filter((it) => it.type === "demande").map((it) => it.skill);
+
+                  // Ligne en mode édition inline ?
+                  const isEditing = inlineEditId === e.id;
+
                   return (
                     <tr key={e.id} title={`${e.lastName} ${e.firstName}`}>
                       <td>
                         <div className="who">
                           <div className="avatar" aria-hidden="true">{initials(e.firstName, e.lastName)}</div>
-                          <div className="wcol"><strong>{e.lastName} {e.firstName}</strong></div>
+                          <div className="wcol">
+                            {isEditing ? (
+                              <div className="grid2">
+                                <input className="input" value={inlineDraft.firstName} onChange={(ev) => setInlineDraft(d => ({ ...d, firstName: ev.target.value }))} placeholder="Prénom"/>
+                                <input className="input" value={inlineDraft.lastName} onChange={(ev) => setInlineDraft(d => ({ ...d, lastName: ev.target.value }))} placeholder="Nom"/>
+                              </div>
+                            ) : (
+                              <strong>{e.lastName} {e.firstName}</strong>
+                            )}
+                          </div>
                         </div>
                       </td>
-                      <td>{e.phone ? <a className="tel" href={`tel:${e.phone.replace(/\s+/g, "")}`}>{e.phone}</a> : <span className="muted">—</span>}</td>
-                      <td>{offers.length ? <div className="tags">{offers.map((s, i) => <span className="tag off" key={i}>{s}</span>)}</div> : <span className="muted">—</span>}</td>
-                      <td>{demands.length ? <div className="tags">{demands.map((s, i) => <span className="tag dem" key={i}>{s}</span>)}</div> : <span className="muted">—</span>}</td>
+
+                      <td>
+                        {isEditing ? (
+                          <input className="input" value={inlineDraft.phone} onChange={(ev) => setInlineDraft(d => ({ ...d, phone: ev.target.value }))} placeholder="06…"/>
+                        ) : (
+                          e.phone ? <a className="tel" href={`tel:${e.phone.replace(/\s+/g, "")}`}>{e.phone}</a> : <span className="muted">—</span>
+                        )}
+                      </td>
+
+                      <td>
+                        {isEditing ? (
+                          <div>
+                            {(inlineDraft.items || []).map((it, i) => (
+                              <div className="row" key={`e-off-${i}`}>
+                                <div className="chips">
+                                  <button type="button" className={`chip ${it.type === "offre" ? "on offre" : "offre"}`} onClick={() => updateDraftItem(i, { type:"offre" })}>Offre</button>
+                                  <button type="button" className={`chip ${it.type === "demande" ? "on demande" : "demande"}`} onClick={() => updateDraftItem(i, { type:"demande" })}>Demande</button>
+                                </div>
+                                <input className="input skill" placeholder="Compétence" value={it.skill} onChange={(ev) => updateDraftItem(i, { skill: ev.target.value })}/>
+                                {(inlineDraft.items || []).length > 1 && (
+                                  <button type="button" className="icon danger" onClick={() => removeDraftItem(i)}>✕</button>
+                                )}
+                              </div>
+                            ))}
+                            <button type="button" className="btn ghost" onClick={addDraftItem}>+ Ajouter</button>
+                          </div>
+                        ) : (
+                          offers.length ? <div className="tags">{offers.map((s, i) => <span className="tag off" key={i}>{s}</span>)}</div> : <span className="muted">—</span>
+                        )}
+                      </td>
+
+                      <td>
+                        {!isEditing ? (
+                          demands.length ? <div className="tags">{demands.map((s, i) => <span className="tag dem" key={i}>{s}</span>)}</div> : <span className="muted">—</span>
+                        ) : (
+                          <span className="muted">—</span>
+                        )}
+                      </td>
+
                       <td className="right">
-                        <button className="btn ghost" onClick={() => startEdit(e)} style={{ marginRight: 8 }} disabled={busy}>Éditer</button>
-                        <button className="btn danger light" onClick={() => handleDelete(e.id)} disabled={busy}>Supprimer</button>
+                        {!isEditing ? (
+                          <>
+                            <button className="btn ghost" onClick={() => startInlineEdit(e)} style={{ marginRight: 8 }} disabled={busy}>Éditer</button>
+                            <button className="btn danger light" onClick={() => handleDelete(e.id)} disabled={busy}>Supprimer</button>
+                          </>
+                        ) : (
+                          <>
+                            <button className="btn primary" onClick={saveInlineEdit} disabled={busy} style={{ marginRight: 8 }}>{busy ? "..." : "Enregistrer"}</button>
+                            <button className="btn ghost" onClick={cancelInlineEdit} disabled={busy}>Annuler</button>
+                          </>
+                        )}
                       </td>
                     </tr>
                   );
@@ -337,14 +432,20 @@ export default function Page() {
       {/* Bulles */}
       {view === "bubbles" && (
         <section className="card">
-          <div className="cardHead"><h2>Bulles par compétence</h2><span className="hint">Taille = popularité, chiffre = off./dem.</span></div>
+          <div className="cardHead"><h2>Bulles par compétence</h2><span className="hint">Clique pour filtrer la liste</span></div>
           <div className="bubblesGrid">
             {bubbles.map((b) => {
               const total = b.offres + b.demandes;
               const size = Math.max(84, Math.min(168, 64 + Math.sqrt(total) * 18));
               const kind = b.offres && b.demandes ? "mix" : b.offres ? "offre" : "demande";
               return (
-                <div key={b.skill} className={`bubble ${kind}`} style={{ width: size, height: size }} title={`${b.skill} • ${b.offres} off. · ${b.demandes} dem.`}>
+                <div
+                  key={b.skill}
+                  className={`bubble ${kind}`}
+                  style={{ width: size, height: size, cursor:"pointer" }}
+                  title={`${b.skill} • ${b.offres} off. · ${b.demandes} dem.`}
+                  onClick={() => { setSearch(b.skill); setView("list"); }}
+                >
                   <div className="bLbl">
                     <div className="bTitle">{b.skill}</div>
                     <div className="bMeta">{b.offres} · {b.demandes}</div>
@@ -354,152 +455,6 @@ export default function Page() {
             })}
           </div>
         </section>
-      )}
-
-      {/* Stats (Nuage + Barres) */}
-      {view === "stats" && (
-        <section className="card">
-          <div className="cardHead">
-            <h2>Stats visuelles</h2>
-            <span className="hint">Nuage = “beau”, Barres = le plus lisible en public.</span>
-          </div>
-
-          <div className="grid2">
-            {/* Nuage OFFRES */}
-            <div>
-              <h3>Nuage — Offres</h3>
-              <div className="cloud">
-                {cloudOffers.map(({ skill, count }) => {
-                  const w = 12 + Math.round(22 * Math.sqrt(count / (maxOffer || 1))); // 12–34px
-                  const o = 0.5 + 0.5 * (count / (maxOffer || 1)); // 0.5–1
-                  return (
-                    <span key={`off-${skill}`} className="cloudItem off" style={{ fontSize: w, opacity: o }} title={`${skill} — ${count} offre(s)`}>
-                      {skill}
-                    </span>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Nuage DEMANDES */}
-            <div>
-              <h3>Nuage — Demandes</h3>
-              <div className="cloud">
-                {cloudDemands.map(({ skill, count }) => {
-                  const w = 12 + Math.round(22 * Math.sqrt(count / (maxDemand || 1)));
-                  const o = 0.5 + 0.5 * (count / (maxDemand || 1));
-                  return (
-                    <span key={`dem-${skill}`} className="cloudItem dem" style={{ fontSize: w, opacity: o }} title={`${skill} — ${count} demande(s)`}>
-                      {skill}
-                    </span>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-
-          <div className="grid2" style={{ marginTop: 12 }}>
-            {/* Barres OFFRES */}
-            <div>
-              <h3>Top — Offres</h3>
-              <div className="bars">
-                {topOffers.map(({ skill, count }) => {
-                  const pct = Math.round((count / (maxOffer || 1)) * 100);
-                  return (
-                    <div key={`bo-${skill}`} className="barRow">
-                      <div className="barLabel">{skill}</div>
-                      <div className="barOuter">
-                        <div className="barInner off" style={{ width: `${pct}%` }} />
-                      </div>
-                      <div className="barCount">{count}</div>
-                    </div>
-                  );
-                })}
-                {!topOffers.length && <div className="muted">Aucune donnée.</div>}
-              </div>
-            </div>
-
-            {/* Barres DEMANDES */}
-            <div>
-              <h3>Top — Demandes</h3>
-              <div className="bars">
-                {topDemands.map(({ skill, count }) => {
-                  const pct = Math.round((count / (maxDemand || 1)) * 100);
-                  return (
-                    <div key={`bd-${skill}`} className="barRow">
-                      <div className="barLabel">{skill}</div>
-                      <div className="barOuter">
-                        <div className="barInner dem" style={{ width: `${pct}%` }} />
-                      </div>
-                      <div className="barCount">{count}</div>
-                    </div>
-                  );
-                })}
-                {!topDemands.length && <div className="muted">Aucune donnée.</div>}
-              </div>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {/* Modal d’édition */}
-      {editingEntry && (
-        <div className="modal" onClick={() => setEditingEntry(null)}>
-          <div className="modalInner" onClick={(e) => e.stopPropagation()}>
-            <div className="dHead">
-              <h3>Modifier la fiche</h3>
-              <button className="icon" onClick={() => setEditingEntry(null)}>✕</button>
-            </div>
-            <form onSubmit={handleEdit} className="form">
-              <div className="grid2">
-                <div className="field"><label>Prénom</label><input className="input" value={editingEntry.firstName} onChange={(e) => setEditingEntry({ ...editingEntry, firstName: e.target.value })} /></div>
-                <div className="field"><label>Nom</label><input className="input" value={editingEntry.lastName} onChange={(e) => setEditingEntry({ ...editingEntry, lastName: e.target.value })} /></div>
-              </div>
-              <div className="field"><label>Téléphone</label><input className="input" value={editingEntry.phone} onChange={(e) => setEditingEntry({ ...editingEntry, phone: e.target.value })} /></div>
-
-              <div className="multi">
-                <div className="multiHead">
-                  <h3>Offres / Demandes</h3>
-                  <button
-                    type="button"
-                    className="btn ghost"
-                    onClick={() => setEditingEntry({ ...editingEntry, items: [...(editingEntry.items || []), { type: "demande", skill: "" }] })}
-                  >+ Ajouter une ligne</button>
-                </div>
-                {(editingEntry.items || []).map((it, i) => (
-                  <div className="row" key={i}>
-                    <div className="chips">
-                      <button
-                        type="button"
-                        className={`chip ${it.type === "offre" ? "on offre" : "offre"}`}
-                        onClick={() => setEditingEntry({ ...editingEntry, items: editingEntry.items.map((x, idx) => idx === i ? { ...x, type: "offre" } : x) })}
-                      >Offre</button>
-                      <button
-                        type="button"
-                        className={`chip ${it.type === "demande" ? "on demande" : "demande"}`}
-                        onClick={() => setEditingEntry({ ...editingEntry, items: editingEntry.items.map((x, idx) => idx === i ? { ...x, type: "demande" } : x) })}
-                      >Demande</button>
-                    </div>
-                    <input
-                      className="input skill"
-                      placeholder="Compétence"
-                      value={it.skill}
-                      onChange={(e) => setEditingEntry({ ...editingEntry, items: editingEntry.items.map((x, idx) => idx === i ? { ...x, skill: e.target.value } : x) })}
-                    />
-                    {(editingEntry.items || []).length > 1 && (
-                      <button type="button" className="icon danger" onClick={() => setEditingEntry({ ...editingEntry, items: editingEntry.items.filter((_, idx) => idx !== i) })}>✕</button>
-                    )}
-                  </div>
-                ))}
-              </div>
-
-              <div className="actions" style={{ gap: 8 }}>
-                <button className="btn primary" type="submit" disabled={busy}>{busy ? "..." : "Enregistrer"}</button>
-                <button className="btn ghost" type="button" onClick={() => setEditingEntry(null)} disabled={busy}>Annuler</button>
-              </div>
-            </form>
-          </div>
-        </div>
       )}
 
       {toast && <div className="toast">{toast}</div>}
