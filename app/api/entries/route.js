@@ -3,10 +3,10 @@ import { list, put, del } from "@vercel/blob";
 
 export const runtime = "edge";
 
-// On stocke 1 fichier JSON par fiche (plus fiable que data.json unique)
+// On stocke 1 fichier JSON par fiche : rers/entries/<id>.json
 const PREFIX = "rers/entries/";
 
-// --- petits utilitaires ---
+// --- utilitaires ---
 const ok = (data, status = 200) =>
   new Response(JSON.stringify(data, null, 2), {
     status,
@@ -14,7 +14,6 @@ const ok = (data, status = 200) =>
   });
 
 const err = (msg, status = 400) => ok({ error: msg }, status);
-
 const isAdmin = (req) => req.headers.get("x-admin-token") === "87800";
 
 // --- LISTER TOUTES LES FICHES ---
@@ -30,8 +29,8 @@ export async function GET() {
   // tri simple : Nom puis Prénom
   entries.sort(
     (a, b) =>
-      (a.lastName || "").localeCompare(b.lastName || "") ||
-      (a.firstName || "").localeCompare(b.firstName || "")
+      (a.lastName || "").localeCompare(b.lastName || "", "fr", { sensitivity: "base" }) ||
+      (a.firstName || "").localeCompare(b.firstName || "", "fr", { sensitivity: "base" })
   );
   return ok({ entries });
 }
@@ -39,6 +38,7 @@ export async function GET() {
 // --- AJOUTER UNE FICHE ---
 export async function POST(req) {
   if (!isAdmin(req)) return err("Unauthorized", 401);
+
   let body;
   try {
     body = await req.json();
@@ -46,8 +46,7 @@ export async function POST(req) {
     return err("Invalid JSON");
   }
 
-  const id =
-    String(Date.now()) + "-" + Math.random().toString(36).slice(2, 7);
+  const id = String(Date.now()) + "-" + Math.random().toString(36).slice(2, 7);
 
   const items = Array.isArray(body.items)
     ? body.items
@@ -67,7 +66,6 @@ export async function POST(req) {
     createdAt: new Date().toISOString(),
   };
 
-  // IMPORTANT: access "public" pour éviter les erreurs d’accès
   await put(`${PREFIX}${id}.json`, JSON.stringify(entry), {
     access: "public",
     contentType: "application/json; charset=utf-8",
@@ -83,7 +81,6 @@ export async function DELETE(req) {
   const url = new URL(req.url);
   let id = url.searchParams.get("id") || "";
 
-  // tolérant : accepte aussi le body { id: "..." } ou des headers alternatifs
   if (!id) {
     try {
       const body = await req.json();
@@ -91,42 +88,41 @@ export async function DELETE(req) {
     } catch {}
   }
   if (!id) id = req.headers.get("x-entry-id") || req.headers.get("x-id") || "";
-
   if (!id) return err("Missing id", 400);
 
   const path = `${PREFIX}${id}.json`;
-  const { blobs } = await list({ prefix: path, limit: 1 });
-  const target = blobs?.[0] && blobs[0].pathname === path ? blobs[0] : null;
+
+  // Recherche robuste du blob cible
+  const { blobs } = await list({ prefix: PREFIX, limit: 1000 });
+  const target = blobs.find((b) => b.pathname === path);
 
   if (!target) return err("Not found", 404);
 
   await del(target.url);
   return ok({ ok: true });
 }
-// --- METTRE À JOUR UNE FICHE EXISTANTE (PATCH) ---
+
+// --- METTRE À JOUR UNE FICHE (PATCH) ---
 export async function PATCH(req) {
   if (!isAdmin(req)) return err("Unauthorized", 401);
 
-  const url = new URL(req.url);
-  let id = url.searchParams.get("id") || "";
-
+  const { searchParams } = new URL(req.url);
+  const id = String(searchParams.get("id") || "").trim();
   if (!id) return err("Missing id", 400);
 
   const path = `${PREFIX}${id}.json`;
 
-  // Vérifie si la fiche existe déjà
-  const { blobs } = await list({ prefix: path, limit: 1 });
-  const target = blobs?.[0] && blobs[0].pathname === path ? blobs[0] : null;
+  // Charger l'existant (404 si absent)
+  const { blobs } = await list({ prefix: PREFIX, limit: 1000 });
+  const target = blobs.find((b) => b.pathname === path);
   if (!target) return err("Not found", 404);
 
-  // Charge la fiche actuelle
   let current = {};
   try {
     const res = await fetch(target.url, { cache: "no-store" });
     if (res.ok) current = await res.json();
   } catch {}
 
-  // Lit les nouvelles données envoyées par le site
   let body;
   try {
     body = await req.json();
@@ -134,7 +130,6 @@ export async function PATCH(req) {
     return err("Invalid JSON");
   }
 
-  // Met à jour les champs
   const items = Array.isArray(body.items)
     ? body.items
         .map((it) => ({
@@ -146,14 +141,24 @@ export async function PATCH(req) {
 
   const entry = {
     ...current,
-    firstName: String(body.firstName || current.firstName || "").trim(),
-    lastName: String(body.lastName || current.lastName || "").trim(),
-    phone: String(body.phone || current.phone || "").trim(),
+    id,
+    firstName:
+      body.firstName !== undefined
+        ? String(body.firstName || "").trim()
+        : current.firstName || "",
+    lastName:
+      body.lastName !== undefined
+        ? String(body.lastName || "").trim()
+        : current.lastName || "",
+    phone:
+      body.phone !== undefined
+        ? String(body.phone || "").trim()
+        : current.phone || "",
     items,
+    createdAt: current.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
 
-  // Enregistre la nouvelle version (remplace l’ancien fichier)
   await put(path, JSON.stringify(entry), {
     access: "public",
     contentType: "application/json; charset=utf-8",
@@ -161,4 +166,3 @@ export async function PATCH(req) {
 
   return ok(entry, 200);
 }
-
