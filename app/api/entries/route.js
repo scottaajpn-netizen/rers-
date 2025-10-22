@@ -112,6 +112,56 @@ export async function PATCH(req) {
 
   const path = `${PREFIX}${id}.json`;
 
+  // On force à n’avoir qu’un seul blob : suppression avant réécriture
+  const { blobs } = await list({ prefix: PREFIX, limit: 1000 });
+  const target = blobs.find((b) => b.pathname === path);
+  if (!target) return err("Not found", 404);
+
+  // Supprimer avant de réécrire (évite le doublon)
+  await del(target.url);
+
+  let current = {};
+  try {
+    const res = await fetch(target.url, { cache: "no-store" });
+    if (res.ok) current = await res.json();
+  } catch {}
+
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return err("Invalid JSON");
+  }
+
+  const items = Array.isArray(body.items)
+    ? body.items
+        .map((it) => ({
+          type: it?.type === "offre" ? "offre" : "demande",
+          skill: String(it?.skill || "").trim(),
+        }))
+        .filter((it) => it.skill)
+    : current.items || [];
+
+  const entry = {
+    ...current,
+    id,
+    firstName: body.firstName?.trim() || current.firstName || "",
+    lastName: body.lastName?.trim() || current.lastName || "",
+    phone: body.phone?.trim() || current.phone || "",
+    items,
+    createdAt: current.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  await put(path, JSON.stringify(entry), {
+    access: "public",
+    contentType: "application/json; charset=utf-8",
+  });
+
+  return ok(entry, 200);
+}
+
+
   // Charger l'existant (404 si absent)
   const { blobs } = await list({ prefix: PREFIX, limit: 1000 });
   const target = blobs.find((b) => b.pathname === path);
