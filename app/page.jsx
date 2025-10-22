@@ -244,20 +244,50 @@ export default function Page() {
 
   // ---- agrégations pour bulles et popup ----
   const skillMap = useMemo(() => {
-    // Map skill(lower) -> { skill, offers:[entry], demands:[entry] }
+    // Fonction de normalisation : regroupe par familles proches
+    function normalizeSkill(raw) {
+      let s = (raw || "").trim().toLowerCase();
+
+      // supprimer accents et caractères spéciaux
+      s = s.normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // accents
+      s = s.replace(/[()\-_,.:;]/g, " "); // ponctuation → espace
+      s = s.replace(/\s+/g, " ").trim(); // espaces multiples
+
+      // mots-clés de regroupement
+      const families = [
+        ["cuisine", "patisserie", "gateau", "recette", "cuisiner", "chocolat"],
+        ["jardinage", "plante", "fleur", "potager", "jardin", "arroser"],
+        ["informatique", "ordi", "ordinateur", "internet", "numérique"],
+        ["couture", "tricot", "crochet", "broderie", "tissu"],
+        ["musique", "guitare", "piano", "chant", "instrument", "batterie"],
+        ["sport", "foot", "yoga", "danse", "natation", "tennis"],
+        ["langue", "anglais", "espagnol", "francais", "allemand"],
+        ["bricolage", "menuiserie", "peinture", "plomberie"],
+        ["lecture", "livre", "écriture", "poeme"],
+      ];
+
+      for (const fam of families) {
+        if (fam.some(k => s.includes(k))) return fam[0]; // on retourne la racine
+      }
+
+      // sinon, on prend juste le premier mot significatif
+      return s.split(" ")[0];
+    }
+
     const map = new Map();
     for (const e of entries) {
       for (const it of e.items || []) {
-        const key = (it.skill || "").trim().toLowerCase();
-        const label = (it.skill || "").trim();
+        const key = normalizeSkill(it.skill);
         if (!key) continue;
-        if (!map.has(key)) map.set(key, { skill: label, offers: [], demands: [] });
+        if (!map.has(key))
+          map.set(key, { skill: key.charAt(0).toUpperCase() + key.slice(1), offers: [], demands: [] });
         const b = map.get(key);
         (it.type === "offre" ? b.offers : b.demands).push(e);
       }
     }
     return map;
   }, [entries]);
+
 
   const bubbles = useMemo(() => {
     const arr = Array.from(skillMap.values()).map((x) => {
