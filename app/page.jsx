@@ -27,7 +27,6 @@ export default function Page() {
   // édition (popup)
   const [editingEntry, setEditingEntry] = useState(null); // { id, firstName, lastName, phone, items:[] }
 
-  // -------- utils --------
   function pop(msg) { setToast(msg); setTimeout(() => setToast(""), 1600); }
 
   async function fetchEntries() {
@@ -47,7 +46,7 @@ export default function Page() {
   }
   useEffect(() => { fetchEntries(); }, []);
 
-  // -------- création --------
+  // ---- création ----
   async function handleAdd(e) {
     e.preventDefault();
     setBusy(true);
@@ -82,7 +81,7 @@ export default function Page() {
     }
   }
 
-  // -------- suppression --------
+  // ---- suppression ----
   async function handleDelete(id) {
     if (!id || !confirm("Supprimer cette fiche ?")) return;
     setBusy(true);
@@ -103,7 +102,7 @@ export default function Page() {
     }
   }
 
-  // -------- édition --------
+  // ---- édition ----
   function startEdit(e) {
     setEditingEntry({
       id: e.id,
@@ -131,16 +130,15 @@ export default function Page() {
       }
 
       const body = {
-        id: editingEntry.id,
         firstName: editingEntry.firstName.trim(),
         lastName:  editingEntry.lastName.trim(),
         phone:     editingEntry.phone.trim(),
         items:     cleanItems,
       };
 
-      // ⚠️ EDIT = PUT sur /api/edit (ne crée pas de doublon)
-      const res = await fetch("/api/edit", {
-        method: "PUT",
+      // PATCH sur la même route, avec l'id en query
+      const res = await fetch(`/api/entries?id=${encodeURIComponent(editingEntry.id)}`, {
+        method: "PATCH",
         headers: { "Content-Type": "application/json", "x-admin-token": ADMIN_TOKEN },
         body: JSON.stringify(body),
       });
@@ -157,7 +155,7 @@ export default function Page() {
     }
   }
 
-  // -------- filtres & bulles --------
+  // ---- recherche & bulles ----
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return entries;
