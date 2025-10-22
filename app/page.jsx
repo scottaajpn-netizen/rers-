@@ -11,7 +11,7 @@ function initials(first, last) {
 export default function Page() {
   // données / UI
   const [entries, setEntries] = useState([]);
-  const [view, setView] = useState("list"); // "list" | "bubbles"
+  const [view, setView] = useState("list"); // "list" | "bubbles" | "stats"
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -45,6 +45,26 @@ export default function Page() {
     }
   }
   useEffect(() => { fetchEntries(); }, []);
+
+  // ---- export JSON ----
+  async function handleExport() {
+    try {
+      const res = await fetch(`/api/entries?t=${Date.now()}`, { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `rers-backup-${new Date().toISOString().slice(0,19).replace(/[:T]/g,"-")}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      pop("Export JSON prêt 📦");
+    } catch (e) {
+      console.error(e);
+      setError("Export impossible.");
+    }
+  }
 
   // ---- création ----
   async function handleAdd(e) {
@@ -155,7 +175,7 @@ export default function Page() {
     }
   }
 
-  // ---- recherche & bulles ----
+  // ---- recherche & agrégations ----
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return entries;
@@ -165,6 +185,29 @@ export default function Page() {
     );
   }, [entries, search]);
 
+  // Agrégations globales (offres/demandes séparées)
+  const { cloudOffers, cloudDemands, topOffers, topDemands, maxOffer, maxDemand } = useMemo(() => {
+    const offers = new Map();
+    const demands = new Map();
+    for (const e of entries) {
+      for (const it of e.items || []) {
+        const key = (it.skill || "").trim();
+        if (!key) continue;
+        if (it.type === "offre") offers.set(key, (offers.get(key) || 0) + 1);
+        else demands.set(key, (demands.get(key) || 0) + 1);
+      }
+    }
+    const toArray = (m) => Array.from(m.entries()).map(([skill, count]) => ({ skill, count }));
+    const cloudOffers = toArray(offers).sort((a,b)=>b.count-a.count);
+    const cloudDemands = toArray(demands).sort((a,b)=>b.count-a.count);
+    const maxOffer = cloudOffers[0]?.count || 1;
+    const maxDemand = cloudDemands[0]?.count || 1;
+    const topOffers = cloudOffers.slice(0, 15);
+    const topDemands = cloudDemands.slice(0, 15);
+    return { cloudOffers, cloudDemands, topOffers, topDemands, maxOffer, maxDemand };
+  }, [entries]);
+
+  // Bulles (mix offres/demandes)
   const bubbles = useMemo(() => {
     const map = new Map();
     for (const e of entries) {
@@ -194,8 +237,10 @@ export default function Page() {
           <div className="rers-seg">
             <button className={view === "list" ? "on" : ""} onClick={() => setView("list")}>Liste</button>
             <button className={view === "bubbles" ? "on" : ""} onClick={() => setView("bubbles")}>Bulles</button>
+            <button className={view === "stats" ? "on" : ""} onClick={() => setView("stats")}>Stats</button>
           </div>
           <button className="btn ghost" onClick={fetchEntries}>{loading ? "…" : "Recharger"}</button>
+          <button className="btn" onClick={handleExport}>Exporter</button>
         </div>
       </header>
 
@@ -307,6 +352,92 @@ export default function Page() {
                 </div>
               );
             })}
+          </div>
+        </section>
+      )}
+
+      {/* Stats (Nuage + Barres) */}
+      {view === "stats" && (
+        <section className="card">
+          <div className="cardHead">
+            <h2>Stats visuelles</h2>
+            <span className="hint">Nuage = “beau”, Barres = le plus lisible en public.</span>
+          </div>
+
+          <div className="grid2">
+            {/* Nuage OFFRES */}
+            <div>
+              <h3>Nuage — Offres</h3>
+              <div className="cloud">
+                {cloudOffers.map(({ skill, count }) => {
+                  const w = 12 + Math.round(22 * Math.sqrt(count / (maxOffer || 1))); // 12–34px
+                  const o = 0.5 + 0.5 * (count / (maxOffer || 1)); // 0.5–1
+                  return (
+                    <span key={`off-${skill}`} className="cloudItem off" style={{ fontSize: w, opacity: o }} title={`${skill} — ${count} offre(s)`}>
+                      {skill}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Nuage DEMANDES */}
+            <div>
+              <h3>Nuage — Demandes</h3>
+              <div className="cloud">
+                {cloudDemands.map(({ skill, count }) => {
+                  const w = 12 + Math.round(22 * Math.sqrt(count / (maxDemand || 1)));
+                  const o = 0.5 + 0.5 * (count / (maxDemand || 1));
+                  return (
+                    <span key={`dem-${skill}`} className="cloudItem dem" style={{ fontSize: w, opacity: o }} title={`${skill} — ${count} demande(s)`}>
+                      {skill}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid2" style={{ marginTop: 12 }}>
+            {/* Barres OFFRES */}
+            <div>
+              <h3>Top — Offres</h3>
+              <div className="bars">
+                {topOffers.map(({ skill, count }) => {
+                  const pct = Math.round((count / (maxOffer || 1)) * 100);
+                  return (
+                    <div key={`bo-${skill}`} className="barRow">
+                      <div className="barLabel">{skill}</div>
+                      <div className="barOuter">
+                        <div className="barInner off" style={{ width: `${pct}%` }} />
+                      </div>
+                      <div className="barCount">{count}</div>
+                    </div>
+                  );
+                })}
+                {!topOffers.length && <div className="muted">Aucune donnée.</div>}
+              </div>
+            </div>
+
+            {/* Barres DEMANDES */}
+            <div>
+              <h3>Top — Demandes</h3>
+              <div className="bars">
+                {topDemands.map(({ skill, count }) => {
+                  const pct = Math.round((count / (maxDemand || 1)) * 100);
+                  return (
+                    <div key={`bd-${skill}`} className="barRow">
+                      <div className="barLabel">{skill}</div>
+                      <div className="barOuter">
+                        <div className="barInner dem" style={{ width: `${pct}%` }} />
+                      </div>
+                      <div className="barCount">{count}</div>
+                    </div>
+                  );
+                })}
+                {!topDemands.length && <div className="muted">Aucune donnée.</div>}
+              </div>
+            </div>
           </div>
         </section>
       )}
