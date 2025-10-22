@@ -3,7 +3,7 @@ import { list, put, del } from "@vercel/blob";
 
 export const runtime = "edge";
 
-// On stocke 1 fichier JSON par fiche : rers/entries/<id>.json
+// 1 fiche JSON par fichier : rers/entries/<id>.json
 const PREFIX = "rers/entries/";
 
 // --- utilitaires ---
@@ -26,7 +26,7 @@ export async function GET() {
       if (res.ok) entries.push(await res.json());
     } catch {}
   }
-  // tri simple : Nom puis Prénom
+  // Tri Nom puis Prénom (insensible aux accents/majuscules de base côté fr)
   entries.sort(
     (a, b) =>
       (a.lastName || "").localeCompare(b.lastName || "", "fr", { sensitivity: "base" }) ||
@@ -112,20 +112,19 @@ export async function PATCH(req) {
 
   const path = `${PREFIX}${id}.json`;
 
-  // On force à n’avoir qu’un seul blob : suppression avant réécriture
+  // Localiser le blob existant
   const { blobs } = await list({ prefix: PREFIX, limit: 1000 });
   const target = blobs.find((b) => b.pathname === path);
   if (!target) return err("Not found", 404);
 
-  // Supprimer avant de réécrire (évite le doublon)
-  await del(target.url);
-
+  // Charger l'existant pour préserver createdAt si possible
   let current = {};
   try {
     const res = await fetch(target.url, { cache: "no-store" });
     if (res.ok) current = await res.json();
   } catch {}
 
+  // Body reçu
   let body;
   try {
     body = await req.json();
@@ -133,53 +132,7 @@ export async function PATCH(req) {
     return err("Invalid JSON");
   }
 
-  const items = Array.isArray(body.items)
-    ? body.items
-        .map((it) => ({
-          type: it?.type === "offre" ? "offre" : "demande",
-          skill: String(it?.skill || "").trim(),
-        }))
-        .filter((it) => it.skill)
-    : current.items || [];
-
-  const entry = {
-    ...current,
-    id,
-    firstName: body.firstName?.trim() || current.firstName || "",
-    lastName: body.lastName?.trim() || current.lastName || "",
-    phone: body.phone?.trim() || current.phone || "",
-    items,
-    createdAt: current.createdAt || new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-
-  await put(path, JSON.stringify(entry), {
-    access: "public",
-    contentType: "application/json; charset=utf-8",
-  });
-
-  return ok(entry, 200);
-}
-
-
-  // Charger l'existant (404 si absent)
-  const { blobs } = await list({ prefix: PREFIX, limit: 1000 });
-  const target = blobs.find((b) => b.pathname === path);
-  if (!target) return err("Not found", 404);
-
-  let current = {};
-  try {
-    const res = await fetch(target.url, { cache: "no-store" });
-    if (res.ok) current = await res.json();
-  } catch {}
-
-  let body;
-  try {
-    body = await req.json();
-  } catch {
-    return err("Invalid JSON");
-  }
-
+  // Nettoyage des items
   const items = Array.isArray(body.items)
     ? body.items
         .map((it) => ({
@@ -209,6 +162,8 @@ export async function PATCH(req) {
     updatedAt: new Date().toISOString(),
   };
 
+  // Pour éviter toute duplication de blob résiduel, on supprime puis on ré-écrit
+  await del(target.url);
   await put(path, JSON.stringify(entry), {
     access: "public",
     contentType: "application/json; charset=utf-8",
